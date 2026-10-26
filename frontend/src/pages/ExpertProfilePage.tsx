@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { Link, Navigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Check,
   ChevronDown,
   ChevronLeft,
+  LoaderCircle,
   ChevronRight,
   ChevronUp,
   Highlighter,
@@ -11,6 +12,7 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react'
+import AppHeader from '@/components/AppHeader'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
@@ -33,12 +35,58 @@ import {
 import { Investigation } from '@/lib/expert-investigate-mock'
 import ExpertInvestigate from './ExpertInvestigate'
 
-// Finished research for one of the mock experts the search returns.
+// Research for one of the experts the search returns. The research is mocked: sections fill in
+// one step at a time over the canned profile.
 export default function ExpertProfilePage() {
   const { expertId: demoId = '' } = useParams()
   const profile = DEMO_PROFILES[demoId]
-  if (!profile) return <Navigate to="/" replace />
+  if (!profile)
+    return (
+      <div className="min-h-screen text-sm">
+        <AppHeader />
+        <main className="mx-auto max-w-[640px] space-y-3 px-4 pt-24">
+          <h1 className="text-xl font-semibold">No research data for this expert yet</h1>
+          <p className="text-muted-foreground">
+            This demo has research for Dr. Margaret Chen and Dr. Robert Alvarez only.
+          </p>
+          <BackButton className="font-medium text-primary hover:underline" />
+        </main>
+      </div>
+    )
   return <ProfileView key={demoId} demoId={demoId} p={profile} />
+}
+
+function BackButton({ className, children }: { className?: string; children?: React.ReactNode }) {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate(-1)} className={className}>
+      {children}
+      Back to results
+    </button>
+  )
+}
+
+// One step per profile section, in the order they fill in.
+const RESEARCH_STEPS = [
+  { section: 'qualifications', label: 'Reading CV and bio' },
+  { section: 'litigation', label: 'Searching court records and transcripts' },
+  { section: 'risk', label: 'Checking licensing boards, background and media' },
+  { section: 'professional', label: 'Building career and education history' },
+]
+const STEP_MS = 2500
+const researched = new Set<string>() // ponytail: in memory, so a reload researches again
+const ReadyContext = createContext<(section: string) => boolean>(() => true)
+
+function useResearch(demoId: string) {
+  const [done, setDone] = useState(researched.has(demoId) ? RESEARCH_STEPS.length : 0)
+  const finished = done >= RESEARCH_STEPS.length
+  useEffect(() => {
+    if (finished) return void researched.add(demoId)
+    const t = setTimeout(() => setDone((d) => d + 1), STEP_MS)
+    return () => clearTimeout(t)
+  }, [done, finished, demoId])
+  const ready = (section: string) => RESEARCH_STEPS.findIndex((s) => s.section === section) < done
+  return { done, finished, ready }
 }
 
 // A highlight marks one profile item, addressed as `${section id}:${item label}`.
@@ -60,6 +108,7 @@ const scrollToMark = (n: number) =>
     ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 
 function ProfileView({ demoId, p }: { demoId: string; p: ExpertProfile }) {
+  const research = useResearch(demoId)
   const [investigating, setInvestigating] = useState(false)
   const [active, setActive] = useState<Investigation | null>(null)
   const [current, setCurrent] = useState(1)
@@ -81,90 +130,109 @@ function ProfileView({ demoId, p }: { demoId: string; p: ExpertProfile }) {
   }
 
   return (
-    <div className="mx-auto max-w-screen-2xl px-4 py-6 md:px-8">
-      <header className="flex items-center justify-between gap-4">
-        <div className="space-y-1">
-          <Link
-            to="/"
-            className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
-          >
-            <ChevronLeft className="size-4" /> New search
-          </Link>
-          <h1 className="text-2xl font-semibold tracking-tight">Expert research</h1>
+    <div className="min-h-screen">
+      <AppHeader />
+      {!research.finished && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-[#DDE1F5] bg-[#EEF0FA] px-6 py-2.5 text-sm text-[#1C2766]"
+        >
+          <LoaderCircle className="size-4 animate-spin" />
+          <span className="font-semibold">Research in progress</span>
+          <span>{RESEARCH_STEPS[research.done].label}… Sections fill in as we find them.</span>
+          <span className="ml-auto text-[13px]">
+            Step {research.done + 1} of {RESEARCH_STEPS.length}
+          </span>
         </div>
-        <Button onClick={() => setInvestigating(true)} className="gap-2">
-          <Sparkles className="size-4" />
-          Expert intel
-        </Button>
-      </header>
-      <div className="mt-6 w-full pb-12 @container">
-        {active && (
-          <div
-            role="status"
-            className="sticky top-2 z-30 mb-4 flex items-center gap-3 rounded-xl border border-amber-300 bg-amber-50/95 py-2 pl-4 pr-2 text-amber-950 shadow-md backdrop-blur dark:border-amber-500/40 dark:bg-amber-950/90 dark:text-amber-50"
-          >
-            <Highlighter className="size-4 shrink-0 text-amber-700 dark:text-amber-400" />
-            <p className="min-w-0 flex-1 truncate text-[13px]">
-              <strong>
-                {active.highlights.length} highlight{active.highlights.length === 1 ? '' : 's'}
-              </strong>{' '}
-              for “{active.question}”
-            </p>
-            <div className="flex items-center text-[13px]">
+      )}
+      <div className="mx-auto max-w-screen-2xl px-4 py-6 md:px-8">
+        <header className="flex items-center justify-between gap-4">
+          <div className="space-y-1">
+            <BackButton className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+              <ChevronLeft className="size-4" />
+            </BackButton>
+            <h1 className="text-2xl font-semibold tracking-tight">Expert research</h1>
+          </div>
+          {research.finished && (
+            <Button onClick={() => setInvestigating(true)} className="gap-2">
+              <Sparkles className="size-4" />
+              Expert intel
+            </Button>
+          )}
+        </header>
+        <div className="mt-6 w-full pb-12 @container">
+          {active && (
+            <div
+              role="status"
+              className="sticky top-2 z-30 mb-4 flex items-center gap-3 rounded-xl border border-amber-300 bg-amber-50/95 py-2 pl-4 pr-2 text-amber-950 shadow-md backdrop-blur dark:border-amber-500/40 dark:bg-amber-950/90 dark:text-amber-50"
+            >
+              <Highlighter className="size-4 shrink-0 text-amber-700 dark:text-amber-400" />
+              <p className="min-w-0 flex-1 truncate text-[13px]">
+                <strong>
+                  {active.highlights.length} highlight{active.highlights.length === 1 ? '' : 's'}
+                </strong>{' '}
+                for “{active.question}”
+              </p>
+              <div className="flex items-center text-[13px]">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 hover:bg-amber-100 dark:hover:bg-amber-900"
+                  aria-label="Previous highlight"
+                  disabled={current <= 1}
+                  onClick={() => step(current - 1)}
+                >
+                  <ChevronUp className="size-4" />
+                </Button>
+                <span className="min-w-12 text-center tabular-nums">
+                  {current} of {active.highlights.length}
+                </span>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8 hover:bg-amber-100 dark:hover:bg-amber-900"
+                  aria-label="Next highlight"
+                  disabled={current >= active.highlights.length}
+                  onClick={() => step(current + 1)}
+                >
+                  <ChevronDown className="size-4" />
+                </Button>
+              </div>
               <Button
-                variant="ghost"
-                size="icon"
-                className="size-8 hover:bg-amber-100 dark:hover:bg-amber-900"
-                aria-label="Previous highlight"
-                disabled={current <= 1}
-                onClick={() => step(current - 1)}
+                variant="outline"
+                size="sm"
+                className="h-8 border-amber-300 bg-transparent hover:bg-amber-100 dark:border-amber-500/40 dark:hover:bg-amber-900"
+                onClick={() => setInvestigating(true)}
               >
-                <ChevronUp className="size-4" />
+                Back to answer
               </Button>
-              <span className="min-w-12 text-center tabular-nums">
-                {current} of {active.highlights.length}
-              </span>
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-8 hover:bg-amber-100 dark:hover:bg-amber-900"
-                aria-label="Next highlight"
-                disabled={current >= active.highlights.length}
-                onClick={() => step(current + 1)}
+                aria-label="Clear highlights"
+                onClick={() => setActive(null)}
               >
-                <ChevronDown className="size-4" />
+                <X className="size-4" />
               </Button>
             </div>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-8 border-amber-300 bg-transparent hover:bg-amber-100 dark:border-amber-500/40 dark:hover:bg-amber-900"
-              onClick={() => setInvestigating(true)}
-            >
-              Back to answer
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="size-8 hover:bg-amber-100 dark:hover:bg-amber-900"
-              aria-label="Clear highlights"
-              onClick={() => setActive(null)}
-            >
-              <X className="size-4" />
-            </Button>
-          </div>
+          )}
+          <HighlightContext.Provider value={marks}>
+            <ReadyContext.Provider value={research.ready}>
+              <Dossier p={p} />
+            </ReadyContext.Provider>
+          </HighlightContext.Provider>
+        </div>
+        {research.finished && (
+          <ExpertInvestigate
+            demoId={demoId}
+            name={`Dr. ${p.name.split(' ').at(-1)}`}
+            open={investigating}
+            onOpenChange={setInvestigating}
+            onHighlight={highlight}
+          />
         )}
-        <HighlightContext.Provider value={marks}>
-          <Dossier p={p} />
-        </HighlightContext.Provider>
       </div>
-      <ExpertInvestigate
-        demoId={demoId}
-        name={`Dr. ${p.name.split(' ').at(-1)}`}
-        open={investigating}
-        onOpenChange={setInvestigating}
-        onHighlight={highlight}
-      />
     </div>
   )
 }
@@ -191,7 +259,7 @@ function MarkNote({ mark }: { mark?: Mark }) {
 
 function Dossier({ p }: { p: ExpertProfile }) {
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border @4xl:flex-row">
+    <div className="flex flex-col overflow-hidden rounded-xl border bg-card @4xl:flex-row">
       <aside className="flex flex-col gap-6 border-b bg-muted/40 p-7 @4xl:w-80 @4xl:shrink-0 @4xl:border-b-0 @4xl:border-r">
         <div className="space-y-3">
           <Avatar initials={p.initials} />
@@ -679,12 +747,25 @@ function Section({
   children: React.ReactNode
 }) {
   const marks = useContext(HighlightContext)
+  const ready = useContext(ReadyContext)(id)
   const hasMarks = [...marks.keys()].some((k) => k.startsWith(`${id}:`))
   const [open, setOpen] = useState(true)
   // A new set of highlights reopens any section the user collapsed that holds one.
   useEffect(() => {
     if (hasMarks) setOpen(true)
   }, [hasMarks, marks])
+
+  if (!ready)
+    return (
+      <section aria-busy="true" className="border-b pb-4 last:border-b-0">
+        <h2 className="p-2 pl-9 text-xl font-semibold text-muted-foreground">{title}</h2>
+        <div aria-hidden="true" className="animate-pulse space-y-2.5 py-4 pl-9">
+          <div className="h-3 w-2/3 rounded bg-muted" />
+          <div className="h-3 w-1/2 rounded bg-muted" />
+          <div className="h-3 w-3/5 rounded bg-muted" />
+        </div>
+      </section>
+    )
 
   return (
     <SectionContext.Provider value={id}>

@@ -1,249 +1,260 @@
-// search → searching → results → the picked expert's profile.
-import { useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { ArrowRight, Check, LoaderCircle, MapPin, RotateCcw, Search } from 'lucide-react'
-import { ShimmeringText } from '@/components/ui/shimmering-text'
+// Search → pick the right person → research (ExpertProfilePage). The query lives in the URL so
+// Back from research returns to the same results.
+import { useEffect, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { LoaderCircle } from 'lucide-react'
+import AppHeader from '@/components/AppHeader'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { searchExperts, ExpertCandidate } from '@/lib/api'
+import { searchExperts, ExpertCandidate, SearchQuery } from '@/lib/api'
 
-type Screen = 'search' | 'searching' | 'results'
-
-const BLUE =
-  'bg-[#3849AB] text-white hover:bg-[#2B3888] disabled:bg-[#E3E5EC] disabled:text-[#6B7080]'
-
-const host = (url: string) => new URL(url).hostname.replace(/^www\./, '')
+type Results = { key: string; people: ExpertCandidate[] } | { key: string; error: string }
 
 export default function ExpertSearchPage() {
-  const navigate = useNavigate()
-  const [screen, setScreen] = useState<Screen>('search')
-  const [name, setName] = useState('')
-  const [hint, setHint] = useState('')
-  const [query, setQuery] = useState('') // what was searched, even if the box changes
-  const [people, setPeople] = useState<ExpertCandidate[]>([])
-  const [picked, setPicked] = useState<ExpertCandidate | null>(null)
-  const [error, setError] = useState('')
-  const run = useRef(0) // bumped on cancel / new search so a stale search can't update the page
+  const [params, setParams] = useSearchParams()
+  const query: SearchQuery = {
+    name: params.get('name') ?? '',
+    specialty: params.get('specialty') ?? '',
+    location: params.get('location') ?? '',
+  }
+  const key = params.toString()
+  const [results, setResults] = useState<Results | null>(null)
 
-  async function startSearch(n: string, h: string) {
-    n = n.trim()
-    h = h.trim()
-    if (!n) return
-    const id = ++run.current
-    const live = () => id === run.current
-    setName(n)
-    setQuery(n)
-    setPicked(null)
-    setError('')
-    setScreen('searching')
-    try {
-      const found = await searchExperts(n, h)
-      if (!live()) return
-      if (found.length) {
-        setPeople(found)
-        setPicked(found.length === 1 ? found[0] : null)
-        setScreen('results')
-      } else {
-        setError(
-          `No expert witness named ${n} turned up. Check the spelling, or add a specialty or city.`
-        )
-        setScreen('search')
-      }
-    } catch (e) {
-      if (!live()) return
-      setError(e instanceof Error ? e.message : 'The search failed. Please try again.')
-      setScreen('search')
+  useEffect(() => {
+    if (!query.name) return setResults(null)
+    let live = true
+    searchExperts(query)
+      .then((people) => live && setResults({ key, people }))
+      .catch(
+        (e) => live && setResults({ key, error: e instanceof Error ? e.message : 'Search failed' })
+      )
+    return () => {
+      live = false
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
 
-  const searchAnother = () => {
-    run.current++
-    setName('')
-    setHint('')
-    setError('')
-    setScreen('search')
-  }
+  const search = (q: SearchQuery) =>
+    setParams(
+      Object.fromEntries(
+        Object.entries(q)
+          .filter(([, v]) => v.trim())
+          .map(([k, v]) => [k, v.trim()])
+      )
+    )
 
   return (
-    <div className="flex min-h-screen flex-col bg-[#F6F7FB] font-[-apple-system,BlinkMacSystemFont,'Segoe_UI',system-ui,sans-serif] text-[#16181D]">
-      <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b border-[#E3E5EC] bg-white px-4 md:px-14">
-        <Link to="/" onClick={searchAnother} className="text-2xl font-bold tracking-tight">
-          ExpertWitness
-        </Link>
-        <button
-          type="button"
-          onClick={searchAnother}
-          className="flex h-11 items-center gap-2 rounded-[10px] border-[1.5px] border-[#D5D8E2] bg-white px-[18px] text-base font-semibold hover:bg-[#F8F9FC]"
-        >
-          <RotateCcw className="size-[18px]" /> New search
-        </button>
-      </header>
-
-      {screen === 'search' && (
-        <main className="flex flex-1 flex-col items-center justify-center gap-10 px-4 pb-20 pt-10 md:px-[120px]">
-          <div className="flex flex-col items-center gap-3.5 text-center">
-            <h1 className="text-4xl font-bold leading-[1.08] tracking-[-0.02em] md:text-[56px]">
-              Who are you looking for?
+    <div className="min-h-screen text-sm">
+      <AppHeader />
+      {!query.name ? (
+        <main className="mx-auto flex max-w-[640px] flex-col gap-6 px-4 pb-12 pt-24">
+          <div className="space-y-1.5">
+            <h1 className="font-serif text-[28px] font-semibold tracking-tight">
+              Find an expert witness
             </h1>
-            <p className="text-[22px] text-[#4A4F5C]">
-              Enter the expert's full name. Add a specialty or city if you know it.
+            <p className="text-muted-foreground">
+              We look them up across the web, court records and licensing boards.
             </p>
           </div>
-          <form
-            className="flex w-full max-w-[960px] flex-col gap-3 rounded-[20px] border border-[#E3E5EC] bg-white p-3 shadow-[0_12px_40px_rgba(22,24,29,0.06)] md:flex-row"
-            onSubmit={(e) => {
-              e.preventDefault()
-              startSearch(name, hint)
-            }}
-          >
-            <label className="flex flex-[3] items-center gap-3.5 rounded-xl border-2 border-transparent bg-[#F6F7FB] px-[18px] focus-within:border-[#3849AB]">
-              <Search className="size-[26px] shrink-0 text-[#3849AB]" strokeWidth={2.2} />
-              <span className="sr-only">Expert name</span>
-              <input
-                autoFocus
-                autoComplete="off"
-                placeholder="Expert's full name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="h-[72px] min-w-0 flex-1 bg-transparent text-[26px] font-medium outline-none placeholder:text-[#8A8F9C]"
-              />
-            </label>
-            <label className="flex flex-[2] items-center rounded-xl border-2 border-transparent bg-[#F6F7FB] px-[18px] focus-within:border-[#3849AB]">
-              <span className="sr-only">Specialty or location (optional)</span>
-              <input
-                autoComplete="off"
-                placeholder="Specialty or city (optional)"
-                value={hint}
-                onChange={(e) => setHint(e.target.value)}
-                className="h-[72px] min-w-0 flex-1 bg-transparent text-xl outline-none placeholder:text-[#8A8F9C]"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={!name.trim()}
-              className={cn(BLUE, 'h-[72px] rounded-xl px-9 text-[22px] font-semibold md:h-auto')}
-            >
-              Search
-            </button>
-          </form>
-          {error && (
+          <SearchForm initial={query} onSearch={search} />
+        </main>
+      ) : (
+        <main className="mx-auto flex max-w-[800px] flex-col gap-5 px-4 pb-12 pt-8">
+          <SearchForm key={key} initial={query} onSearch={search} compact />
+          {results?.key !== key ? (
+            <p role="status" className="flex items-center gap-2 text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin text-primary" /> Searching for{' '}
+              {query.name}…
+            </p>
+          ) : 'error' in results ? (
             <p
               role="alert"
-              className="w-full max-w-[960px] rounded-xl border border-[#F1C9C6] bg-[#FDF2F1] px-5 py-4 text-[17px] text-[#8A2F2A]"
+              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800"
             >
-              {error}
+              {results.error}
+            </p>
+          ) : results.people.length ? (
+            <CandidateList query={query} people={results.people} />
+          ) : (
+            <p className="rounded-xl border bg-card px-5 py-4 text-muted-foreground">
+              No expert witness named {query.name} turned up. Check the spelling, or try without the
+              specialty or city.
             </p>
           )}
         </main>
       )}
+    </div>
+  )
+}
 
-      {screen === 'searching' && (
-        <main className="flex flex-1 flex-col items-center justify-center gap-8 px-4 pb-20 md:px-[120px]">
-          <h1 className="text-center text-4xl font-bold leading-[1.1] tracking-[-0.02em] md:text-5xl">
-            Looking for {query}…
-          </h1>
-          <div aria-live="polite" className="flex items-center gap-3 text-xl font-semibold">
-            <LoaderCircle className="size-6 animate-spin text-[#3849AB]" strokeWidth={2.4} />
-            <ShimmeringText text="Searching…" color="#3849AB" shimmeringColor="#9AA4DB" />
-          </div>
-          <button
-            type="button"
-            onClick={searchAnother}
-            className="h-12 rounded-[10px] px-[22px] text-[17px] font-semibold text-[#4A4F5C] hover:text-[#16181D]"
-          >
-            Cancel
-          </button>
-        </main>
-      )}
+function SearchForm({
+  initial,
+  onSearch,
+  compact,
+}: {
+  initial: SearchQuery
+  onSearch: (q: SearchQuery) => void
+  compact?: boolean
+}) {
+  const [q, setQ] = useState(initial)
+  const field = (k: keyof SearchQuery) => ({
+    value: q[k],
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setQ({ ...q, [k]: e.target.value }),
+  })
 
-      {screen === 'results' && (
-        <main className="flex flex-1 flex-col gap-8 px-4 pb-14 pt-12 md:px-[120px]">
-          <div className="flex flex-col gap-2.5">
-            <h1 className="text-3xl font-bold leading-[1.1] tracking-[-0.02em] md:text-[44px]">
-              We found {people.length} {people.length === 1 ? 'person' : 'people'} named {query}
-            </h1>
-            <p className="text-xl text-[#4A4F5C]">
-              {people.length === 1
-                ? 'Is this your expert?'
-                : 'Which one is your expert? Tap a card to choose.'}
-            </p>
-          </div>
+  if (compact)
+    return (
+      <form
+        className="flex flex-wrap gap-2"
+        onSubmit={(e) => {
+          e.preventDefault()
+          onSearch(q)
+        }}
+      >
+        <Field label="Full name" className="flex-[2_1_220px]">
+          <Input {...field('name')} required className="bg-card" />
+        </Field>
+        <Field label="Specialty" className="flex-[1_1_150px]">
+          <Input {...field('specialty')} placeholder="Any" className="bg-card" />
+        </Field>
+        <Field label="City or state" className="flex-[1_1_150px]">
+          <Input {...field('location')} placeholder="Anywhere" className="bg-card" />
+        </Field>
+        <Button type="submit" variant="outline" className="self-end">
+          Update
+        </Button>
+      </form>
+    )
 
-          <ul className="grid gap-6 md:grid-cols-3">
-            {people.map((p) => {
-              const sel = picked === p
-              return (
-                <li
-                  key={p.id}
+  return (
+    <form
+      className="flex flex-col gap-3.5 rounded-xl border bg-card p-5"
+      onSubmit={(e) => {
+        e.preventDefault()
+        onSearch(q)
+      }}
+    >
+      <Field label="Full name" strong>
+        <Input
+          {...field('name')}
+          required
+          autoFocus
+          placeholder="e.g. Margaret Chen"
+          className="h-10 text-[15px]"
+        />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Specialty" optional>
+          <Input {...field('specialty')} placeholder="e.g. Orthopedic surgery" className="h-10" />
+        </Field>
+        <Field label="City or state" optional>
+          <Input {...field('location')} placeholder="e.g. Ohio" className="h-10" />
+        </Field>
+      </div>
+      <Button type="submit" className="h-10 self-end px-5">
+        Search
+      </Button>
+    </form>
+  )
+}
+
+function Field({
+  label,
+  optional,
+  strong,
+  className,
+  children,
+}: {
+  label: string
+  optional?: boolean
+  strong?: boolean
+  className?: string
+  children: React.ReactNode
+}) {
+  return (
+    <label className={cn('flex flex-col gap-1.5', className)}>
+      <span
+        className={cn(
+          'text-[13px]',
+          strong ? 'font-semibold' : 'font-medium text-muted-foreground'
+        )}
+      >
+        {label} {optional && <span className="font-normal">(optional)</span>}
+      </span>
+      {children}
+    </label>
+  )
+}
+
+function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCandidate[] }) {
+  const navigate = useNavigate()
+  return (
+    <>
+      <div className="space-y-1">
+        <h1 className="text-xl font-semibold">
+          {people.length} possible {people.length === 1 ? 'match' : 'matches'} for {query.name}
+        </h1>
+        <p className="text-muted-foreground">
+          Choose the right person and we'll research them in depth.
+        </p>
+      </div>
+      <ul className="divide-y rounded-xl border bg-card">
+        {people.map((p) => (
+          <li key={p.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
+            <div className="flex min-w-0 flex-[1_1_400px] flex-col gap-1.5">
+              <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+                <span className="text-[15px] font-semibold">{p.name}</span>
+                <span className="text-muted-foreground">
+                  {p.specialty} · {p.location}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-[13px]">
+                <span
                   className={cn(
-                    'flex flex-col overflow-hidden rounded-[20px] border-2',
-                    sel
-                      ? 'border-[#3849AB] bg-[#F3F5FD] shadow-[0_0_0_4px_rgba(56,73,171,0.15)]'
-                      : 'border-[#E3E5EC] bg-white shadow-[0_4px_16px_rgba(22,24,29,0.04)]'
+                    'rounded-full px-2 py-0.5 font-semibold',
+                    p.match === 'strong'
+                      ? 'bg-[#E3F1EA] text-[#1D5B40]'
+                      : 'bg-[#FFF1DC] text-[#7A4E00]'
                   )}
                 >
-                  <button
-                    type="button"
-                    aria-pressed={sel}
-                    onClick={() => setPicked(sel ? null : p)}
-                    className="flex flex-1 flex-col gap-3.5 rounded-t-[18px] px-7 pb-5 pt-7 text-left hover:bg-[#F8F9FC]"
-                  >
-                    <div className="flex w-full items-start justify-between gap-3">
-                      <div className="flex flex-col gap-1.5">
-                        <span className="text-2xl font-bold">{p.name}</span>
-                        <span className="text-lg font-semibold text-[#3849AB]">{p.specialty}</span>
-                      </div>
-                      {sel ? (
-                        <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-[#3849AB]">
-                          <Check className="size-[18px] text-white" strokeWidth={3} />
-                        </span>
-                      ) : (
-                        <span className="size-8 shrink-0 rounded-full border-2 border-[#C3C7D3]" />
-                      )}
-                    </div>
-                    <div className="flex items-start gap-2 text-base text-[#4A4F5C]">
-                      <MapPin className="mt-px size-[18px] shrink-0" />
-                      <span>
-                        <strong className="font-semibold text-[#16181D]">{p.location}</strong>
-                        {p.otherLocations.length > 0 &&
-                          ` · also works in ${p.otherLocations.join(', ')}`}
-                      </span>
-                    </div>
-                    <p className="text-[17px] leading-normal text-[#2E323B]">{p.summary}</p>
-                  </button>
-                  {p.urls.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-x-3.5 gap-y-2 border-t border-[#EEF0F4] px-7 pb-5 pt-3.5 text-[15px]">
-                      <span className="text-[#5B6070]">Sources</span>
-                      {p.urls.map((u) => (
-                        <a
-                          key={u}
-                          href={u}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-[#3849AB] underline hover:text-[#2B3888]"
-                        >
-                          {host(u)}
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-
-          <button
-            type="button"
-            disabled={!picked}
-            onClick={() => picked && navigate(`/experts/${picked.id}`)}
-            className={cn(
-              BLUE,
-              'flex h-16 items-center gap-2.5 self-center rounded-xl px-9 text-xl font-semibold'
-            )}
-          >
-            This is my expert <ArrowRight className="size-[22px]" strokeWidth={2.2} />
-          </button>
-        </main>
-      )}
-    </div>
+                  {p.match === 'strong' ? 'Strong match' : 'Partial match'}
+                </span>
+                <span className="text-muted-foreground">{p.matchReason}</span>
+              </div>
+              <p className="leading-normal text-[#2E3442]">{p.summary}</p>
+              {p.sources.length > 0 && (
+                <span className="text-[13px] text-muted-foreground">
+                  Found on{' '}
+                  {p.sources.map((s, i) => (
+                    <span key={s.url}>
+                      {i > 0 && ', '}
+                      <a
+                        href={s.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary hover:underline"
+                      >
+                        {s.label}
+                      </a>
+                    </span>
+                  ))}
+                </span>
+              )}
+            </div>
+            <Button
+              variant={p.match === 'strong' ? 'default' : 'outline'}
+              className={cn(p.match !== 'strong' && 'border-primary text-primary')}
+              onClick={() => navigate(`/experts/${p.id}`)}
+            >
+              Research this expert
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-muted-foreground">
+        Not the person you're looking for? Add a specialty or city above.
+      </p>
+    </>
   )
 }
