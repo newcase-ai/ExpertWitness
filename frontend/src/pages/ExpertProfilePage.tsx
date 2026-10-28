@@ -1,9 +1,11 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Check,
   ChevronDown,
   ChevronLeft,
+  FileText,
+  Link2,
   LoaderCircle,
   ChevronRight,
   ChevronUp,
@@ -13,8 +15,8 @@ import {
   X,
 } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
+import { caseContexts, DOC_TYPES, ROLE_LABEL } from '@/lib/case-context'
 import { Button } from '@/components/ui/button'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import {
   Dialog,
   DialogContent,
@@ -66,7 +68,7 @@ function BackButton({ className, children }: { className?: string; children?: Re
   )
 }
 
-// One step per profile section, in the order they fill in.
+// One step per research area, in the order they fill in. Each tab shows once its area is done.
 const RESEARCH_STEPS = [
   { section: 'qualifications', label: 'Reading CV and bio' },
   { section: 'litigation', label: 'Searching court records and transcripts' },
@@ -87,6 +89,39 @@ function useResearch(demoId: string) {
   }, [done, finished, demoId])
   const ready = (section: string) => RESEARCH_STEPS.findIndex((s) => s.section === section) < done
   return { done, finished, ready }
+}
+
+type Tab =
+  | 'overview'
+  | 'analysis'
+  | 'cases'
+  | 'records'
+  | 'background'
+  | 'publications'
+  | 'career'
+  | 'sources'
+const TABS: { id: Tab; label: string; section: string }[] = [
+  { id: 'overview', label: 'Overview', section: 'qualifications' },
+  { id: 'analysis', label: 'Case analysis', section: 'professional' }, // once research is done
+  { id: 'cases', label: 'Cases and testimony', section: 'litigation' },
+  { id: 'records', label: 'Records', section: 'litigation' },
+  { id: 'background', label: 'Background', section: 'risk' },
+  { id: 'publications', label: 'Publications and media', section: 'risk' },
+  { id: 'career', label: 'Career', section: 'professional' },
+  { id: 'sources', label: 'Sources', section: 'professional' },
+]
+
+// Highlight targets are `${section}:${label}`; two tabs share a section, so look the label up.
+function tabOf(p: ExpertProfile, target: string): Tab {
+  const [section, label] = [
+    target.slice(0, target.indexOf(':')),
+    target.slice(target.indexOf(':') + 1),
+  ]
+  if (section === 'qualifications') return 'overview'
+  if (section === 'litigation') return p.cases.some((c) => c.name === label) ? 'cases' : 'records'
+  if (section === 'risk')
+    return p.risk.some((f) => f.label === label) ? 'background' : 'publications'
+  return 'career'
 }
 
 // A highlight marks one profile item, addressed as `${section id}:${item label}`.
@@ -112,22 +147,30 @@ function ProfileView({ demoId, p }: { demoId: string; p: ExpertProfile }) {
   const [investigating, setInvestigating] = useState(false)
   const [active, setActive] = useState<Investigation | null>(null)
   const [current, setCurrent] = useState(1)
+  const [params] = useSearchParams()
+  const [tab, setTab] = useState<Tab>(
+    TABS.find((t) => t.id === params.get('tab'))?.id ?? 'overview'
+  )
+  const context = caseContexts.get(demoId)
+  const shortName = `Dr. ${p.name.split(' ').at(-1)}`
   const marks = useMemo(
     () => new Map(active?.highlights.map((h, i) => [h.target, { n: i + 1, note: h.note }])),
     [active]
   )
 
+  // Show the tab holding highlight n, then scroll to it once that tab has rendered.
+  const goToMark = (investigation: Investigation, n: number, delay: number) => {
+    setCurrent(n)
+    setTab(tabOf(p, investigation.highlights[n - 1].target))
+    setTimeout(() => scrollToMark(n), delay)
+  }
   const highlight = (investigation: Investigation) => {
     setActive(investigation)
-    setCurrent(1)
     setInvestigating(false)
-    // After the sheet slides out and any collapsed section opens.
-    setTimeout(() => scrollToMark(1), 350)
+    goToMark(investigation, 1, 350) // after the sheet slides out
   }
-  const step = (n: number) => {
-    setCurrent(n)
-    scrollToMark(n)
-  }
+  const step = (n: number) => goToMark(active!, n, 50)
+  const marksIn = (t: Tab) => active?.highlights.filter((h) => tabOf(p, h.target) === t).length ?? 0
 
   return (
     <div className="min-h-screen">
@@ -145,22 +188,92 @@ function ProfileView({ demoId, p }: { demoId: string; p: ExpertProfile }) {
           </span>
         </div>
       )}
-      <div className="mx-auto max-w-screen-2xl px-4 py-6 md:px-8">
-        <header className="flex items-center justify-between gap-4">
-          <div className="space-y-1">
-            <BackButton className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-              <ChevronLeft className="size-4" />
-            </BackButton>
-            <h1 className="text-2xl font-semibold tracking-tight">Expert research</h1>
+      <div className="border-b bg-card">
+        <div className="mx-auto flex max-w-[1120px] flex-col gap-5 px-4 pt-5">
+          <BackButton className="flex items-center gap-1 self-start text-[13px] text-muted-foreground hover:text-foreground">
+            <ChevronLeft className="size-4" />
+          </BackButton>
+          <div className="flex flex-wrap items-center gap-4">
+            <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-[#EEF0FA] text-lg font-bold text-primary">
+              {p.initials}
+            </span>
+            <div className="min-w-0 flex-[1_1_320px] space-y-1">
+              <h1 className="text-[22px] font-semibold">{p.name}</h1>
+              <p className="text-sm text-muted-foreground">
+                {p.title}
+                {basedIn(p) && ` · ${basedIn(p)}`}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {context ? (
+                <Link
+                  to={`/experts/${demoId}/context`}
+                  className="flex h-9 items-center gap-2 rounded-lg border border-primary/40 bg-[#F4F5FC] px-3 text-[13px]"
+                >
+                  <Link2 className="size-4 text-primary" />
+                  <span>
+                    <strong className="font-semibold">{context.case.name}</strong>
+                    <span className="text-muted-foreground"> · {ROLE_LABEL[context.role]}</span>
+                  </span>
+                  <span className="font-medium text-primary">Edit</span>
+                </Link>
+              ) : (
+                <Button
+                  asChild
+                  variant="outline"
+                  className="gap-1.5 border-dashed border-primary/60 text-primary"
+                >
+                  <Link to={`/experts/${demoId}/context`}>
+                    <Link2 className="size-4" />
+                    Add case context
+                  </Link>
+                </Button>
+              )}
+              {research.finished && (
+                <Button onClick={() => setInvestigating(true)} className="gap-2">
+                  <Sparkles className="size-4" />
+                  Ask about this expert
+                </Button>
+              )}
+            </div>
           </div>
-          {research.finished && (
-            <Button onClick={() => setInvestigating(true)} className="gap-2">
-              <Sparkles className="size-4" />
-              Expert intel
-            </Button>
-          )}
-        </header>
-        <div className="mt-6 w-full pb-12 @container">
+          <div
+            role="tablist"
+            aria-label="Profile sections"
+            className="-mb-px flex gap-1 overflow-x-auto"
+          >
+            {TABS.map((t) => {
+              const ready = research.ready(t.section)
+              const n = marksIn(t.id)
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={tab === t.id}
+                  onClick={() => setTab(t.id)}
+                  className={cn(
+                    'flex items-center gap-1.5 whitespace-nowrap border-b-2 px-3 py-2.5 text-sm',
+                    tab === t.id
+                      ? 'border-primary font-semibold text-foreground'
+                      : 'border-transparent font-medium text-muted-foreground hover:text-foreground'
+                  )}
+                >
+                  {!ready && <LoaderCircle className="size-3.5 animate-spin text-primary" />}
+                  {t.label}
+                  {n > 0 && (
+                    <span className="flex size-[18px] items-center justify-center rounded-full bg-amber-500 text-[11px] font-bold text-white">
+                      {n}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+      <div className="mx-auto max-w-[1120px] px-4 py-6">
+        <div className="w-full pb-12 @container">
           {active && (
             <div
               role="status"
@@ -219,14 +332,14 @@ function ProfileView({ demoId, p }: { demoId: string; p: ExpertProfile }) {
           )}
           <HighlightContext.Provider value={marks}>
             <ReadyContext.Provider value={research.ready}>
-              <Dossier p={p} />
+              <TabPanel p={p} demoId={demoId} tab={tab} onTab={setTab} />
             </ReadyContext.Provider>
           </HighlightContext.Provider>
         </div>
         {research.finished && (
           <ExpertInvestigate
             demoId={demoId}
-            name={`Dr. ${p.name.split(' ').at(-1)}`}
+            name={shortName}
             open={investigating}
             onOpenChange={setInvestigating}
             onHighlight={highlight}
@@ -257,117 +370,288 @@ function MarkNote({ mark }: { mark?: Mark }) {
   )
 }
 
-function Dossier({ p }: { p: ExpertProfile }) {
+const basedIn = (p: ExpertProfile) => p.contact.find((c) => c.label === 'Based in')?.value
+
+const CARD = 'rounded-xl border bg-card p-5'
+
+function TabPanel({
+  p,
+  demoId,
+  tab,
+  onTab,
+}: {
+  p: ExpertProfile
+  demoId: string
+  tab: Tab
+  onTab: (t: Tab) => void
+}) {
+  const ready = useContext(ReadyContext)
+  const t = TABS.find((x) => x.id === tab)!
+  if (!ready(t.section)) return <Pending className={CARD} />
+
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border bg-card @4xl:flex-row">
-      <aside className="flex flex-col gap-6 border-b bg-muted/40 p-7 @4xl:w-80 @4xl:shrink-0 @4xl:border-b-0 @4xl:border-r">
-        <div className="space-y-3">
-          <Avatar initials={p.initials} />
-          <h2 className="text-2xl font-semibold tracking-tight">{p.name}</h2>
-          <p className="text-[15px] leading-relaxed text-muted-foreground">{p.title}</p>
-        </div>
-        <dl className="space-y-3.5 text-sm">
-          {p.contact.map((c) => (
-            <div key={c.label}>
-              <dt className="text-xs text-muted-foreground">{c.label}</dt>
-              <dd className="mt-0.5 leading-snug">{c.value}</dd>
-            </div>
-          ))}
-        </dl>
-        <div>
-          <Label>Areas of expertise</Label>
-          <Tags tags={p.tags} />
-        </div>
-        <div className="border-t pt-5">
-          <Label>Compiled from public and proprietary sources</Label>
-          <Sources sources={p.sources} />
-        </div>
-        <Disclaimer className="rounded-lg bg-muted px-3 py-2.5" />
-      </aside>
-
-      <div className="min-w-0 flex-1 space-y-4 p-8 @container">
-        <Section id="qualifications" title="Qualifications">
-          <div className="grid gap-6 @3xl:grid-cols-[minmax(0,1fr)_17rem]">
+    <SectionContext.Provider value={t.section}>
+      {tab === 'overview' && (
+        <div className="grid gap-4 @3xl:grid-cols-3">
+          <section className={cn(CARD, 'space-y-4 @3xl:col-span-2')}>
+            <h2 className="text-base font-semibold">Summary</h2>
             <p className="text-[15px] leading-7">{p.qualifications}</p>
-            <QualificationHighlights facts={p.highlights} />
-          </div>
-        </Section>
-
-        <Section id="litigation" title="Litigation history">
-          <div className="space-y-5 rounded-lg border p-6">
-            <div className="grid grid-cols-2 gap-4 @3xl:grid-cols-4">
-              {litigationCounts(p).map((s) => (
-                <div key={s.label}>
-                  <div className="text-3xl font-semibold tracking-tight">{s.n}</div>
-                  <div className="text-sm text-muted-foreground">{s.label}</div>
+            <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
+              {litigationCounts(p).map((c) => (
+                <div key={c.label}>
+                  <div className="text-xl font-semibold">{c.n}</div>
+                  <div className="text-[13px] text-muted-foreground">{c.label}</div>
                 </div>
               ))}
             </div>
+          </section>
+          <ThingsToKnow p={p} />
+          <section className={cn(CARD, '@3xl:col-span-2')}>
+            <h2 className="mb-3 text-base font-semibold">Key facts</h2>
+            <QualificationHighlights facts={p.highlights} />
+          </section>
+          {ready('litigation') ? (
+            <section className={cn(CARD, '@3xl:col-span-3')}>
+              <div className="mb-1 flex items-baseline justify-between gap-3">
+                <h2 className="text-base font-semibold">Recent testimony</h2>
+                <button
+                  type="button"
+                  onClick={() => onTab('cases')}
+                  className="text-sm font-medium text-primary hover:underline"
+                >
+                  All {p.cases.length} cases
+                </button>
+              </div>
+              <SectionContext.Provider value="litigation">
+                <CaseList cases={p.cases.slice(0, 3)} />
+              </SectionContext.Provider>
+            </section>
+          ) : (
+            <Pending className={cn(CARD, '@3xl:col-span-3')} />
+          )}
+        </div>
+      )}
+
+      {tab === 'analysis' && <CaseAnalysis p={p} demoId={demoId} />}
+
+      {tab === 'cases' && (
+        <div className="space-y-4">
+          <section className={CARD}>
             <LitigationTimeline cases={p.cases} />
-          </div>
-          <div>
+          </section>
+          <section className={CARD}>
             <SubHeading note="Every case where the expert was deposed, testified at trial or was named in a filing">
               Cases &amp; testimony
             </SubHeading>
             <CaseList cases={p.cases} />
-          </div>
-          <div>
-            <SubHeading note="Transcripts, filings and challenges tied to the expert. Open any item for details.">
-              Records found
-            </SubHeading>
-            <FactGrid facts={p.documents} />
-          </div>
-        </Section>
+          </section>
+        </div>
+      )}
 
-        <Section id="risk" title="Risk & credibility">
-          <div>
-            <SubHeading note="Licensing boards, court records and background checks">
-              Discipline &amp; background
-            </SubHeading>
-            <FactGrid facts={p.risk} />
-          </div>
-          <div>
+      {tab === 'records' && (
+        <section className={CARD}>
+          <SubHeading note="Transcripts, filings and challenges tied to the expert. Open any item for details.">
+            Records found
+          </SubHeading>
+          <FactGrid facts={p.documents} />
+        </section>
+      )}
+
+      {tab === 'background' && (
+        <section className={CARD}>
+          <SubHeading note="Licensing boards, court records and background checks">
+            Discipline &amp; background
+          </SubHeading>
+          <FactGrid facts={p.risk} />
+        </section>
+      )}
+
+      {tab === 'publications' && (
+        <div className="space-y-4">
+          <section className={CARD}>
             <SubHeading note="Papers, talks and CLE lectures that opposing counsel can quote back">
               Publications, lectures &amp; presentations
             </SubHeading>
             <EntryList entries={p.publications} />
-          </div>
-          <div className="grid gap-8 @3xl:grid-cols-3">
-            <div>
-              <SubHeading note="Press articles about or quoting the expert">
-                News features
-              </SubHeading>
+          </section>
+          <div className="grid gap-4 @3xl:grid-cols-3">
+            <section className={CARD}>
+              <SubHeading note="Press articles about or quoting the expert">News</SubHeading>
               <EntryList entries={p.news} />
-            </div>
-            <div>
-              <SubHeading note="Public accounts and what they post">
-                Social media presence
-              </SubHeading>
+            </section>
+            <section className={CARD}>
+              <SubHeading note="Public accounts and what they post">Social media</SubHeading>
               <EntryList entries={p.social} />
-            </div>
-            <div>
+            </section>
+            <section className={CARD}>
               <SubHeading note="Websites, CVs and directory listings">Online presence</SubHeading>
               <EntryList entries={p.online} />
-            </div>
+            </section>
           </div>
-        </Section>
+        </div>
+      )}
 
-        <Section id="professional" title="Professional history">
-          <div className="grid gap-8 @3xl:grid-cols-2">
-            <div>
-              <SubHeading>Career</SubHeading>
-              <Career roles={p.career} />
-            </div>
-            <div className="space-y-6">
-              <div>
-                <SubHeading>Education &amp; training</SubHeading>
-                <EntryList entries={p.education} strong />
-              </div>
+      {tab === 'career' && (
+        <div className="grid gap-4 @3xl:grid-cols-2">
+          <section className={CARD}>
+            <SubHeading>Career</SubHeading>
+            <Career roles={p.career} />
+          </section>
+          <div className="space-y-4">
+            <section className={CARD}>
+              <SubHeading>Education &amp; training</SubHeading>
+              <EntryList entries={p.education} strong />
+            </section>
+            <section className={CARD}>
               <Facts facts={p.professional} />
-            </div>
+            </section>
           </div>
-        </Section>
-      </div>
+        </div>
+      )}
+
+      {tab === 'sources' && (
+        <section className={cn(CARD, 'space-y-4')}>
+          <SubHeading note="Where this profile's information comes from">Sources</SubHeading>
+          <Sources sources={p.sources} />
+          <Disclaimer />
+        </section>
+      )}
+    </SectionContext.Provider>
+  )
+}
+
+// Before the user adds context: what they get and what to add. After: what they added.
+// ponytail: the analysis itself (re-analysis progress and insights) is the next step to build.
+function CaseAnalysis({ p, demoId }: { p: ExpertProfile; demoId: string }) {
+  const context = caseContexts.get(demoId)
+  const shortName = `Dr. ${p.name.split(' ').at(-1)}`
+  const contextLink = (
+    <Button asChild className="self-start">
+      <Link to={`/experts/${demoId}/context`}>
+        {context ? 'Edit case context' : 'Add case context'}
+      </Link>
+    </Button>
+  )
+
+  if (context)
+    return (
+      <section className={cn(CARD, 'space-y-4 text-sm')}>
+        <div className="space-y-1">
+          <h2 className="text-base font-semibold">Case context</h2>
+          <p className="text-muted-foreground">
+            {context.case.name} · {ROLE_LABEL[context.role]}
+          </p>
+        </div>
+        {context.testimony && <p className="leading-relaxed">{context.testimony}</p>}
+        <ul className="divide-y rounded-lg border">
+          {context.docs.map((d, i) => (
+            <li key={i} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3.5 py-2.5">
+              <FileText className="size-4 text-primary" />
+              <span className="min-w-0 flex-1 truncate font-medium">{d.name}</span>
+              <span className="text-[13px] text-muted-foreground">
+                {DOC_TYPES.find((t) => t.id === d.type)?.label ?? 'Other'}
+              </span>
+            </li>
+          ))}
+        </ul>
+        {context.notes && <p className="text-muted-foreground">{context.notes}</p>}
+        <p className="rounded-lg bg-[#F4F5FC] px-3.5 py-3 text-[#1C2766]">
+          The analysis of these documents against {shortName}'s record will appear here.
+        </p>
+        {contextLink}
+      </section>
+    )
+
+  return (
+    <div className="space-y-4 text-sm">
+      <section className={cn(CARD, 'flex flex-col gap-5 p-7')}>
+        <div className="max-w-[640px] space-y-1.5">
+          <h2 className="font-serif text-2xl font-semibold">
+            Turn this profile into a case strategy
+          </h2>
+          <p className="text-[15px] leading-relaxed">
+            Share what you have on {shortName} in your case. We'll read it against everything in the
+            public record and show where the expert is vulnerable, or needs preparing.
+          </p>
+        </div>
+        <div className="grid gap-3 @3xl:grid-cols-2">
+          <div className="space-y-1.5 rounded-lg bg-[#F7F8FA] p-4">
+            <div className="font-semibold">If they're the other side's expert</div>
+            <p className="leading-normal">
+              Impeachment points, contradictions with prior testimony, Daubert grounds, bias and
+              conflicts, cross-examination questions.
+            </p>
+          </div>
+          <div className="space-y-1.5 rounded-lg bg-[#F7F8FA] p-4">
+            <div className="font-semibold">If they're your expert</div>
+            <p className="leading-normal">
+              Weak spots opposing counsel will find, likely cross questions with suggested answers,
+              gaps in the report, a prep checklist.
+            </p>
+          </div>
+        </div>
+        {contextLink}
+      </section>
+      <section className="space-y-3">
+        <div>
+          <h2 className="text-base font-semibold">What you can add</h2>
+          <p className="text-muted-foreground">
+            Anything helps. The highlighted ones give the most.
+          </p>
+        </div>
+        <div className="grid gap-2.5 @xl:grid-cols-2 @4xl:grid-cols-3">
+          {DOC_TYPES.map((t) => (
+            <div
+              key={t.id}
+              className={cn(
+                'space-y-1 rounded-lg border bg-card px-4 py-3.5',
+                'key' in t && 'border-[#C9CEEA]'
+              )}
+            >
+              <div className="font-semibold">{t.label}</div>
+              <div className="text-[13px] leading-normal text-muted-foreground">{t.hint}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  )
+}
+
+// Flagged records first, then a one-line all-clear for the background checks that found nothing.
+function ThingsToKnow({ p }: { p: ExpertProfile }) {
+  const ready = useContext(ReadyContext)
+  if (!ready('litigation') || !ready('risk'))
+    return <Pending className={cn(CARD, '@3xl:row-span-2')} />
+  const flagged = [...p.documents, ...p.risk].filter((f) => f.flag)
+  const clear = p.risk.filter((f) => f.value.startsWith('None'))
+  return (
+    <section className={cn(CARD, 'space-y-3 @3xl:row-span-2')}>
+      <h2 className="text-base font-semibold">Things to know</h2>
+      {flagged.map((f) => (
+        <div key={f.label} className="space-y-1 rounded-lg bg-[#FFF8EC] p-3">
+          <div className="font-semibold text-[#7A4E00]">{f.label}</div>
+          <div className="text-sm leading-normal">{f.value}</div>
+        </div>
+      ))}
+      {clear.length > 0 && (
+        <div className="space-y-1 rounded-lg bg-[#F2FAF6] p-3">
+          <div className="font-semibold text-[#1D5B40]">Clean record</div>
+          <div className="text-sm leading-normal">
+            No {clear.map((f) => f.label.toLowerCase()).join(', ')} found.
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function Pending({ className }: { className?: string }) {
+  return (
+    <div aria-busy="true" className={cn('animate-pulse space-y-2.5', className)}>
+      <div className="h-3 w-2/3 rounded bg-muted" />
+      <div className="h-3 w-1/2 rounded bg-muted" />
+      <div className="h-3 w-3/5 rounded bg-muted" />
     </div>
   )
 }
@@ -697,26 +981,6 @@ function Career({ roles }: { roles: Role[] }) {
   )
 }
 
-function Avatar({ initials }: { initials: string }) {
-  return (
-    <span className="flex size-16 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xl font-semibold text-primary">
-      {initials}
-    </span>
-  )
-}
-
-function Tags({ tags }: { tags: string[] }) {
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {tags.map((t) => (
-        <span key={t} className="rounded-full border bg-background px-2.5 py-1 text-xs">
-          {t}
-        </span>
-      ))}
-    </div>
-  )
-}
-
 function Sources({ sources }: { sources: string[] }) {
   return (
     <ul className="space-y-1.5 text-[13px]">
@@ -737,51 +1001,6 @@ function Disclaimer({ className }: { className?: string }) {
   )
 }
 
-function Section({
-  id,
-  title,
-  children,
-}: {
-  id: string
-  title: string
-  children: React.ReactNode
-}) {
-  const marks = useContext(HighlightContext)
-  const ready = useContext(ReadyContext)(id)
-  const hasMarks = [...marks.keys()].some((k) => k.startsWith(`${id}:`))
-  const [open, setOpen] = useState(true)
-  // A new set of highlights reopens any section the user collapsed that holds one.
-  useEffect(() => {
-    if (hasMarks) setOpen(true)
-  }, [hasMarks, marks])
-
-  if (!ready)
-    return (
-      <section aria-busy="true" className="border-b pb-4 last:border-b-0">
-        <h2 className="p-2 pl-9 text-xl font-semibold text-muted-foreground">{title}</h2>
-        <div aria-hidden="true" className="animate-pulse space-y-2.5 py-4 pl-9">
-          <div className="h-3 w-2/3 rounded bg-muted" />
-          <div className="h-3 w-1/2 rounded bg-muted" />
-          <div className="h-3 w-3/5 rounded bg-muted" />
-        </div>
-      </section>
-    )
-
-  return (
-    <SectionContext.Provider value={id}>
-      <Collapsible open={open} onOpenChange={setOpen} asChild>
-        <section className="border-b pb-4 last:border-b-0">
-          <CollapsibleTrigger className="group -mx-2 flex w-[calc(100%+1rem)] items-center gap-2 rounded-md p-2 text-left hover:bg-muted/50">
-            <ChevronRight className="size-5 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-            <h2 className="text-xl font-semibold">{title}</h2>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="space-y-8 py-4">{children}</CollapsibleContent>
-        </section>
-      </Collapsible>
-    </SectionContext.Provider>
-  )
-}
-
 function SubHeading({ note, children }: { note?: string; children: React.ReactNode }) {
   return (
     <div className="mb-3">
@@ -789,8 +1008,4 @@ function SubHeading({ note, children }: { note?: string; children: React.ReactNo
       {note && <p className="mt-0.5 text-[13px] text-muted-foreground">{note}</p>}
     </div>
   )
-}
-
-function Label({ children }: { children: React.ReactNode }) {
-  return <h3 className="mb-2.5 text-xs font-medium text-muted-foreground">{children}</h3>
 }
