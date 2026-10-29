@@ -407,6 +407,28 @@ def test_websearch_one_query_drops_blocked_and_caps_the_query(sources):
     ("Alex Rivera dauberttracker.com", True),
     ("Alex J. Rivera Ph.D. ... U.S.", False),  # dots that are not sites
     ("Alex Rivera site:example.edu", False),
+    # glued to punctuation or behind other operators (QA bypasses)
+    ("Alex Rivera|site:linkedin.com", True),
+    ('"Alex Rivera"site:linkedin.com', True),
+    ("Alex Rivera inurl:linkedin.com", True),
+    ("Alex Rivera related:linkedin.com", True),
+    ("Alex Rivera cache:linkedin.com", True),
+    ("Alex Rivera intitle:expert site:uk.linkedin.com/in", True),
+    ("Alex Rivera lnkd.in/abc", True),
+    ("Alex Rivera \uff4c\uff49\uff4e\uff4b\uff45\uff44\uff49\uff4e\uff0e\uff43\uff4f\uff4d", True),  # full-width
+    ("Alex Rivera linkedin\u3002com", True),  # ideographic full stop
+    ("Alex Rivera linkedin\uff0ecom", True),  # full-width full stop
+    ("Alex Rivera linkedin\uff61com", True),  # half-width ideographic full stop
+    ("Alex Rivera linked\u200bin.com", True),  # zero-width space
+    ("Alex Rivera linked\u200cin.com", True),  # zero-width non-joiner
+    ("Alex Rivera linked\u200din.com", True),  # zero-width joiner
+    ("Alex Rivera linked\u2060in.com", True),  # word joiner
+    ("Alex Rivera linked\ufeffin.com", True),  # BOM
+    ("Alex Rivera linked\u00adin.com", True),  # soft hyphen
+    ("Alex Rivera site:linkedin.\u200bcom", True),
+    ("Gary Stanton expert witness Michigan", False),
+    ("Smith v. Jones 2019", False),
+    ("Alex Rivera notlinkedin.com", False),
 ])
 def test_websearch_query_naming_a_banned_site(query, blocked):
     assert websearch.names_blocked_site(query) is blocked

@@ -6,10 +6,11 @@ stored or returned. Only URL, title and our own extracted facts leave this step.
 
 import asyncio
 import re
+import unicodedata
 
 from app import llm
 from app.evidence import copied, squash
-from app.sources import has_full_name, host_of, is_blocked, is_listing
+from app.sources import has_full_name, is_blocked, is_listing
 
 MAX_HITS = 10  # per query
 TITLE_MAX = 200  # web titles are third-party text: keep them short
@@ -61,15 +62,21 @@ def to_hits(items: list[dict], query: str = "bare", name: str | None = None) -> 
     return hits[:MAX_HITS]
 
 
+# Every domain-shaped run of characters, wherever it sits: glued to quotes, `|`, brackets or an
+# operator (`site:`, `inurl:`, `related:`, `cache:`, ...) it is still found.
+HOST_LIKE = re.compile(r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)+", re.IGNORECASE)
+# Other full stops become ".", invisible characters (zero-width space/non-joiner/joiner, word joiner,
+# BOM, soft hyphen) are removed, so "linkedin\u3002com" or "linked\u200bin.com" is still found.
+QUERY_FOLD = str.maketrans({"\u3002": ".", "\uff0e": ".", "\uff61": ".",
+                            **dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"))})
+
+
 def names_blocked_site(query: str) -> bool:
-    """True if the query names a gotcha 2 site, with `site:` or as a bare domain (same list as
-    `is_blocked`), so a model-written query never asks the search for those sites."""
-    for token in query.split():
-        domain = re.sub(r"(?i)^[-+(\"']*(site:)?", "", token).strip("\"')")
-        url = "https://" + domain.split("/")[0]
-        if "." in domain and host_of(url) and is_blocked(url):  # an unreadable host is not a site
-            return True
-    return False
+    """True if any domain-shaped piece of the query is a gotcha 2 site (same rule as `is_blocked`),
+    so a model-written query never asks the search for those sites, whatever operator or
+    punctuation surrounds it. Dots that are not sites ("Ph.D.", "v.", "U.S.") pass."""
+    text = unicodedata.normalize("NFKC", query).translate(QUERY_FOLD)  # full-width letters -> ASCII
+    return any(is_blocked("https://" + m.group()) for m in HOST_LIKE.finditer(text))
 
 
 async def search_query(name: str, query: str, kind: str = "follow-up") -> list[dict]:

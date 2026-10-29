@@ -919,17 +919,22 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
 - Reply: `{"file_id", "note_md"}`. No findings (tool 8 turns notes into findings).
 - Done when: note saved, header made by code, under 3,000 chars (test); copied text dropped (test).
 
-**Tool 6: site search (engineer, T6).** File `app/tools/site_search.py`.
-`site_search(domain: str, query: str)`, label "Search a website", cap 8.
-- Purpose: search one website for the expert, a case number, a state or another clue; return hits with URLs.
-- Method is the engineer's choice: the site manual's search URL (memory 2) scraped with Firecrawl, or
-  a Firecrawl search limited to the domain. `ctx.fetch_ok` before every fetch. A new Firecrawl call
-  goes in a new file `app/sources/firecrawl_search.py` (owned by T6).
-- Hits that name the expert (full name) or the asked case -> kind `site_hit` (url = the hit's page,
-  confidence `low`, facts written by code or by `ctx.ask_model`, never page text).
-- Reply: `{"hits": [{"ref", "title", "url"}], "used_manual": bool}`.
-- Legal: gotchas 1, 24, 25 (Firecrawl checks), 4 (a search behind login or captcha -> `block_site`).
-- Done when: hits saved with URLs (test); blocked/banned domain refused (test); no page text stored (test).
+**Tool 6: Firecrawl search (T6, lead, 2026-10-29).** File `app/tools/firecrawl_search.py`.
+`firecrawl_search(query: str, sites: list[str] = [])`, label "Search the web or chosen sites", cap 8.
+- Purpose: search for the expert, a case number, a state or another clue, either on the whole web
+  (`sites` empty) or only on up to 5 given sites (e.g. a state court site from tool 2); return hits with URLs.
+- Method: Firecrawl's search API (a search engine query with `site:` filters), never the sites themselves
+  and never scraping the result pages (credits). The call lives in `app/sources/firecrawl_search.py`.
+  Each site is checked with `ctx.fetch_ok` first (banned, API hosts like courtlistener.com, blocked-sites
+  memory -> refused); a hit whose host is not one of the asked sites, or fails `ctx.fetch_ok`, is dropped.
+  Site manuals (memory 2) are not used until tool 3 exists.
+- Hits whose title or snippet names the expert (full name) -> kind `site_hit` (url = the hit's page,
+  title = the hit's title, confidence `low`, facts written by code: query, site, what matched). The
+  snippet is only checked in memory, never stored (gotchas 10, 15).
+- Reply: `{"hits": [{"ref", "title", "url"}], "not_shown": int}`. No key -> skipped + gap.
+- Legal: gotchas 1, 2, 24, 25 (Firecrawl), 3 (professional records only).
+- Done when: hits saved with URLs (test); banned / API / blocked site refused (test); off-site hit
+  dropped (test); no snippet stored (test); open web search with no sites works (test); no key -> skipped (test).
 
 **Tool 7: web reader and download (engineer, T7).** File `app/tools/web_reader.py`. Two tools.
 - `read_web_page(url: str)`: label "Read a web page", cap 8. Firecrawl `scrape` after
@@ -999,7 +1004,7 @@ stays importable but unused until M8 removes it.
 Lead: DESIGN 4.2-4.4 and 4A marked replaced.
 
 **Engineer tracks (after M7 is committed):** each owns its tool file + `tests/test_tool_<file>.py`:
-T2 `state_sites.py`, T3 `site_guide.py`, T4 `ask_pdf.py`, T5 `note_file.py`, T6 `site_search.py` (+ new
+T2 `state_sites.py`, T3 `site_guide.py`, T4 `ask_pdf.py`, T5 `note_file.py`, T6 `firecrawl_search.py` (+ new
 `app/sources/firecrawl_search.py`), T7 `web_reader.py` (+ additions to `app/sources/firecrawl.py`), T8
 `review_files.py`.
 
