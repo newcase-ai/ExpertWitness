@@ -1,5 +1,5 @@
 """Shared by the agents (DESIGN 4A.4-4A.5): copy-check helpers and the per-run evidence store.
-Imports only `app.sources`, so agents, collectors and websearch can all import it (no cycle)."""
+Imports only `app.sources`, so agents, tools and websearch can all import it (no cycle)."""
 
 import asyncio
 import functools

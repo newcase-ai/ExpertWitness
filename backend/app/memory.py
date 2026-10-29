@@ -21,10 +21,15 @@ SECRET = re.compile(
 )
 LONG_NUMBER = re.compile(r"\d(?: ?\d){11,}")  # 12+ digits in a row (card numbers), spaces allowed
 DASHED_NUMBER = re.compile(r"\d(?:[ -]?\d){11,18}")  # 4111-1111-1111-1111: a card only if Luhn-valid
+# Never card numbers: ORCID ids (0000-0002-1825-0097, about 1 in 10 passes Luhn by chance), ISBN-13 and
+# DOIs (10.1007/s00415-019-09213-x: about 1 in 9 Springer DOIs passes Luhn).
+NOT_CARDS = re.compile(r"(?<![\d-])000[09]-\d{4}-\d{4}-\d{3}[\dX](?![\w-])"
+                       r"|(?<![\d-])97[89](?:-?\d){10}(?![\w-])"
+                       r"|\b10\.\d{4,9}/\S+")
 
 
 def luhn(digits: str) -> bool:
-    """The card number checksum (ORCID-style dashed ids usually fail it)."""
+    """The card number checksum."""
     total = sum(int(d) if i % 2 == 0 else (2 * int(d)) // 10 + (2 * int(d)) % 10
                 for i, d in enumerate(reversed(digits)))
     return total % 10 == 0
@@ -39,6 +44,7 @@ def looks_secret(text: str | None, url: bool = False) -> bool:
         return True
     if url:
         return False
+    text = NOT_CARDS.sub(" ", text)
     return bool(LONG_NUMBER.search(text)) or any(
         luhn(re.sub(r"\D", "", m.group())) for m in DASHED_NUMBER.finditer(text))
 

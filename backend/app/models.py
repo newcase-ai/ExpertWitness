@@ -197,7 +197,6 @@ class ResearchStarted(BaseModel):
 class Finding(BaseModel):
     finding_id: str = ""  # assigned by app/store.py when saved
     # Open strings (DESIGN 4B.11 D2): `collector` is the tool name, `kind` is listed on each tool card.
-    # The M3 collectors still use testimony/publications/credentials until M8 removes them.
     collector: str = Field(min_length=1)
     kind: str = Field(min_length=1)
     title: str

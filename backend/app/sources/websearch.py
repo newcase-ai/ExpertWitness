@@ -1,4 +1,4 @@
-"""Meta built-in web search for the candidate finder (DESIGN 4.1) and the research collectors
+"""Meta built-in web search for the candidate finder (DESIGN 4.1) and the research tools
 (DESIGN 4.2, 4.4); gotchas 2, 14, 15.
 
 Snippets are third-party page text: they stay in memory for the grouping prompt and are never
@@ -105,7 +105,7 @@ async def search_people(name: str, hints: dict | None, failed_queries: list[str]
     return hits
 
 
-# Research collectors: short facts about one person for a topic, from web results (DESIGN 4.2, 4.4).
+# Research tools: short facts about one person for a topic, from web results (DESIGN 4.2, 4.4).
 FACT_MAX = 200  # characters per fact
 FACTS_PER_RESULT = 3
 NOTES_MAX = 4000  # characters of the search model's notes per query (prompt only, never stored)

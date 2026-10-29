@@ -352,6 +352,8 @@ file is gitignored (gotcha 8).
   `x-ratelimit-remaining-usd` header and skip OpenAlex below $0.005. CourtListener: 1 of 125/day.
 
 ### 4.2 Testimony collector (CourtListener)
+
+> Replaced for part 2 by the main agent tools (4B, M8): see the tool 1 and 12 cards in 4B.9.
 - Input: the candidate (full name, middle initial if known, surname, field).
 - Calls:
   1. Search, one call, name variants joined with OR:
@@ -376,6 +378,8 @@ file is gitignored (gotcha 8).
   so about 1.6 min. Cached URLs cost nothing.
 
 ### 4.3 Publications collector (OpenAlex + Crossref/Retraction Watch)
+
+> Replaced for part 2 by the main agent tools (4B, M8): see the tool 9 and 10 cards in 4B.9.
 - Input: the candidate's OpenAlex ids, name.
 - Calls:
   1. OpenAlex author by id (free): `GET https://api.openalex.org/authors/<id>` for stats
@@ -402,6 +406,8 @@ file is gitignored (gotcha 8).
   Back off on 429 ([tips](https://www.crossref.org/documentation/retrieve-metadata/rest-api/tips-for-using-the-crossref-rest-api/)).
 
 ### 4.4 Credentials collector (OIG LEIE + Meta web search)
+
+> Replaced for part 2 by the main agent tools (4B, M8): see the tool 11 and 12 cards in 4B.9.
 - Input: candidate name, field, location.
 - OIG LEIE: download [UPDATED.csv](https://oig.hhs.gov/exclusions/downloadables/UPDATED.csv) to
   `data/` (gitignored) when the local copy is older than 35 days (the file is replaced monthly,
@@ -448,7 +454,7 @@ file is gitignored (gotcha 8).
 
 ## 4A. ADK architecture (M4 design, built in M5-M6)
 
-> Part 2 (research job): replaced by 4B (approved 2026-10-29). Part 1 still follows 4A.
+> Part 2 (research job): replaced by 4B (approved 2026-10-29; old research code removed in M8). Part 1 still follows 4A.
 
 Decided 2026-10-29: agents run on Google ADK (`google-adk` 2.13.0) with its LiteLlm adapter
 (`litellm` 1.106.6) to the Meta Model API; A2A is out of scope. This section sets *how agents run*;
@@ -650,9 +656,11 @@ async def exclusion_check(ctx: Ctx) -> dict:
     possible match, never proof. Takes no arguments."""
     first, last = given_family(ctx.expert.display_name)
     matches = await leie.possible_matches(first, last)
-    refs = [ctx.add_finding("leie_possible_match", "OIG exclusion list: possible match", m["url"],
-                            facts={"state": m.get("state")}, confidence="low", note=LEIE_NOTE)
-            for m in matches]
+    # every match links the same OIG search page: a fragment keeps them apart (add_finding dedupes kind+URL)
+    refs = [ctx.add_finding("leie_possible_match", "OIG exclusion list: possible match",
+                            f"{m['url']}#possible-match-{i}", facts={"state": m.get("state")},
+                            confidence="low", note=LEIE_NOTE)
+            for i, m in enumerate(matches, 1)]
     ctx.log(f"{len(refs)} possible matches")
     return {"possible_matches": len(refs), "refs": refs}
 ```

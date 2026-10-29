@@ -10,7 +10,7 @@ from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.genai import types
 from pydantic import Field
 
-from app import collectors, http, jobs, llm, store
+from app import http, jobs, llm, store
 from app.evidence import Run
 from app.models import Candidate
 from app.sources import courtlistener, crossref, firecrawl, leie, openalex, websearch
@@ -192,7 +192,7 @@ def sources_fixture(monkeypatch):
     http.set_client(None)
 
 
-# Research collectors (M3): fake return values of the source functions, keyed "module.function".
+# Research tools: fake return values of the source functions, keyed "module.function".
 
 
 def cl_hit(oid, date):
@@ -220,18 +220,6 @@ def crossref_hit(doi):
 PAGE_TEXT = "SYNTHETIC-PAGE-TEXT"  # marker: page markdown must never reach a finding or the database
 PAGE_MARKDOWN = (f"{PAGE_TEXT} Alex J. Rivera, PhD, board-certified toxicologist. Testimony: Doe v. Example Co.,"
                  " N.D. Example 2019 (deposition, plaintiff); Roe v. Sample Corp. (trial).")
-PAGE_REPLY = {
-    "about_person": True,
-    "cases": [{"case_name": "Doe v. Example Co.", "court": "N.D. Example", "year": "2019", "side": "plaintiff",
-               "role": "deposition"},
-              {"case_name": "Roe v. Sample Corp.", "court": "", "year": "", "side": "unknown", "role": "trial"}],
-    "credentials": ["Holds a board certification in toxicology",
-                    # repeats 40+ characters of the page word for word: dropped by the copy guard
-                    "Alex J. Rivera, PhD, board-certified toxicologist. Testimony: Doe"],
-}
-LIST_REPLY = {"cases": [{"case_name": "Poe vs. Demo LLC", "court": "Example County Court", "year": "2017"}]}
-
-
 def scrape_page(url):
     return {"url": url, "title": "Alex J. Rivera - CV", "markdown": PAGE_MARKDOWN}
 
@@ -246,12 +234,8 @@ def find_case(case_name, name, court=None, year=None):
 
 
 def model_reply(instructions, input, schema=None, web_search=False, output_type=None):
-    """The AI calls of the page reader and the cross-check, told apart by their JSON schema."""
-    replies = {id(collectors.PAGE_SCHEMA): PAGE_REPLY, id(collectors.LIST_SCHEMA): LIST_REPLY,
-               id(collectors.COURT_PAGE_SCHEMA): {"shows_case": True, "shows_person": True}}
-    if id(schema) not in replies:
-        raise AssertionError("unexpected AI call in a research test")
-    return llm.ModelResult(data=copy.deepcopy(replies[id(schema)]))
+    """Default AI call in research tests: none is expected unless a test sets its own."""
+    raise AssertionError("unexpected AI call in a research test")
 
 
 RESEARCH_SOURCES = {

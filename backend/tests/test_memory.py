@@ -79,3 +79,21 @@ def test_fixed_values_are_checked():
         memory.save_state_site("Ohio", "example.gov", "dockets", "high")
     with pytest.raises(ValueError):
         memory.save_state_site("OH", "example.gov", "dockets", "great")
+
+
+# Real-format ORCID ids (valid ISO 7064 check character) whose 16 digits also pass the card checksum.
+LUHN_ORCIDS = ["0000-4114-4269-4203", "0009-4104-0901-6104", "0000-3303-6148-1105", "0000-8344-9472-857X"]
+
+
+@pytest.mark.parametrize("text", [*(f"ORCID {o}" for o in LUHN_ORCIDS), f"https://orcid.org/{LUHN_ORCIDS[0]}",
+                                  "ISBN 9780306406157", "ISBN 979-1-0000-0000-9", "isbn:9781000000006",
+                                  "doi 10.1007/s00415-019-09213-x"])
+def test_no_secret_lets_orcid_ids_isbn13_and_dois_through(text):
+    assert memory.no_secret(text) == text
+
+
+@pytest.mark.parametrize("text", ["4111-1111-1111-1111", "4111111111111111", "card 4111 1111 1111 1111",
+                                  f"ORCID {LUHN_ORCIDS[0]}, card 4111-1111-1111-1111"])
+def test_no_secret_still_refuses_card_numbers(text):
+    with pytest.raises(ValueError, match="secret"):
+        memory.no_secret(text)
