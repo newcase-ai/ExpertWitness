@@ -128,6 +128,9 @@ Response 200:
 
 Errors: 404 unknown `job_id`.
 
+Part 2 change (M7): every job also returns an `activity` list, and the research job has one
+step row (`main_agent`). See 4B.6.
+
 ### GET /dossiers/{dossier_id}
 200: the dossier (section 3). 404 `{"detail": "dossier not found"}`. 409 while the job is not
 done, same error shape: `{"detail": "dossier not ready: job job_02 is running"}` (or
@@ -445,6 +448,8 @@ file is gitignored (gotcha 8).
 
 ## 4A. ADK architecture (M4 design, built in M5-M6)
 
+> Part 2 (research job): replaced by 4B (approved 2026-10-29). Part 1 still follows 4A.
+
 Decided 2026-10-29: agents run on Google ADK (`google-adk` 2.13.0) with its LiteLlm adapter
 (`litellm` 1.106.6) to the Meta Model API; A2A is out of scope. This section sets *how agents run*;
 4.1-4.5 still set the sources, limits and guards. Facts come from the live spike (2026-10-29).
@@ -603,6 +608,412 @@ Read-only in M5: the other `app/sources/` modules, `app/http.py`, `app/models.py
 5. Whether ADK runs several tool calls from one turn in parallel: not verified (limits assume not).
 6. ADK/LiteLLM log levels must never write prompts (page text, M6 documents); gotcha 29 traceback.
 7. Step and time numbers are starting values, tuned in the M5 live runs.
+
+## 4B. Main agent framework (part 2; M6 design, built in M7-M8)
+
+Status: approved by the user, 2026-10-29. Replaces 4.2-4.4 and 4A for part 2 (the research
+job, after the user picks a candidate). Part 1 (candidate search, 4.1, `app/agents.py`) is unchanged.
+**Engineers building a tool: read 4B.1-4B.8 once, then your card in 4B.9.**
+
+### 4B.1 The idea
+One ADK agent (the **main agent**) researches the picked expert. It does nothing itself: every
+action is a **tool** call. There is no fixed checklist; the agent decides what to call next until it
+replies DONE or hits a limit. Tools save what they find in **memories** (SQLite). Every call goes
+through one **wrapper** (caps, clock, banned sites, errors, activity log), so a tool author writes
+only the tool's own logic.
+
+```
+POST /research -> job -> main agent (ADK loop, 10 min, 40 model calls)
+                           | calls a tool by name
+                           v
+                  wrapper (app/tools/__init__.py): args, cap, clock, never raises, activity row
+                           v
+                  tool fn(ctx, ...) (one file in app/tools/) -> app/sources/* clients
+                           v
+                  memories (app/memory.py + findings table) + files on disk (data/files/)
+```
+
+### 4B.2 Tool contract (6a)
+A tool is an async function in its own file in `app/tools/`, registered with `@tool`:
+
+```python
+"""Tool 11: OIG exclusion list (LEIE)."""
+from app.sources import given_family, leie
+from app.tools import Ctx, tool
+
+LEIE_NOTE = "possible match by name only; verify at the OIG online search"
+
+
+@tool(label="OIG exclusion list", cap=1)
+async def exclusion_check(ctx: Ctx) -> dict:
+    """Check the federal OIG exclusion list (LEIE) for the expert. A name match is only a
+    possible match, never proof. Takes no arguments."""
+    first, last = given_family(ctx.expert.display_name)
+    matches = await leie.possible_matches(first, last)
+    refs = [ctx.add_finding("leie_possible_match", "OIG exclusion list: possible match", m["url"],
+                            facts={"state": m.get("state")}, confidence="low", note=LEIE_NOTE)
+            for m in matches]
+    ctx.log(f"{len(refs)} possible matches")
+    return {"possible_matches": len(refs), "refs": refs}
+```
+
+Rules:
+- **Signature:** first parameter `ctx: Ctx`, then the model's arguments, each with a type hint
+  (`str`, `int`, `bool`, `Literal[...]`, with defaults where optional). Returns a `dict`.
+- **The model sees** the function name (the tool name), the docstring (when and how to use it) and
+  the arguments. It never sees `ctx`: the registry gives ADK a wrapper whose `__signature__` and
+  `__annotations__` leave `ctx` out (gotcha 34). M7 checks this live; fallback: build the ADK
+  `FunctionDeclaration` from the same signature by hand.
+- **Names:** unique across `app/tools/` (gotcha 44; a duplicate raises at import); never an argument
+  called `name` (gotcha 36); never the same name as a function the file imports (gotcha 38).
+- **Discovery:** `app/tools/__init__.py` imports every module in the folder at startup
+  (`pkgutil.iter_modules`), so **adding a tool = one new file + its test; no framework file changes.**
+- **Reply:** a small JSON-able dict, at most `RESULT_MAX` (8,000) characters as JSON. Put the `refs`
+  of saved findings in it so the agent can point to them. Page text may be in a reply when the agent
+  must read it (in memory only, never stored); secrets never (gotcha 45).
+- **Refusing:** `return refuse("fixed text")` (from `app.evidence`) when the tool will not run, for
+  example a URL that is not allowed. Fixed text only, never source or model text.
+- **Failing:** just raise. The wrapper catches everything. Raise `SourceSkipped("fixed text")`
+  (`app.sources`) when a source cannot be used (no key, no id); it becomes a `skipped` row and a gap.
+- **Saving:** only through `ctx` (findings, gaps, files) and `app.memory` (long-term memories).
+
+What the wrapper does with each call:
+
+| Case | Model gets | Activity status | Counts against cap |
+| --- | --- | --- | --- |
+| Arguments do not fit the type hints | `BAD_ARGUMENTS` | `refused` | no |
+| Cap used up, or no time left | `LIMIT_REACHED` | `refused` | no |
+| Tool returns `refuse(text)` | `{"error": text}` | `refused` | yes |
+| Tool raises `SourceSkipped(text)` | `{"error": "source not available: <text>"}` | `skipped` (+ gap) | yes |
+| Tool raises anything else | `TOOL_FAILED` | `failed` (+ gap, exception type only) | yes |
+| Job deadline reached during the call | `LIMIT_REACHED` | `failed` ("time limit") | yes |
+| Reply longer than `RESULT_MAX` | `{"error": "tool reply too long"}` | `failed` | yes |
+| Otherwise | the tool's dict | `done` | yes |
+
+`BAD_ARGUMENTS`, `LIMIT_REACHED`, `TOOL_FAILED`, `refuse`, `checked_args` and the cap/clock counter
+(`Run`) are reused from `app/evidence.py`.
+
+### 4B.3 `Ctx`: what a tool gets
+One `Ctx` per research job, made by `app/main_agent.py`.
+
+| Member | What it does |
+| --- | --- |
+| `ctx.expert` | The picked `Candidate`: `display_name`, `field`, `location`, `affiliations`, `identifiers`, `evidence`. |
+| `ctx.job_id`, `ctx.dossier_id` | Ids of this run. |
+| `ctx.time_left()` | Seconds left before the 10-minute deadline. |
+| `ctx.add_finding(kind, title, url, facts=None, confidence="low", note=None) -> ref` | Saves one finding to the profile at once (survives a crash) and returns its `finding_id`. URL must be http(s) and not a gotcha 2 domain; title cut to 200 chars; `facts` at most 4,000 chars as JSON. Same `kind` + URL again returns the existing ref. `collector` is set to the tool's name by the wrapper. |
+| `ctx.add_gap(reason)` | Saves a gap (`step` = tool name). Fixed or code-made text only. |
+| `ctx.findings(kind=None) -> list[Finding]` | The profile so far, for this dossier. |
+| `ctx.fetch_ok(url) -> str \| None` | `None` if the tool may fetch the URL; otherwise a fixed refusal text: not http(s), gotcha 2 domain, an API source host (gotcha 40), or listed in `blocked_sites`. Call it before any fetch of a model-given URL. |
+| `ctx.save_file(url, data, mime, text=None) -> file_id` | Stores downloaded bytes in `data/files/<dossier_id>/<file_id>.<ext>` and, if given, a text version (`<file_id>.md`) for tools 4, 5, 8. Checks `fetch_ok(url)`, at most 20 MB per file, 30 files per job. Adds a `files` row. |
+| `ctx.file_text(file_id, max_chars=60_000) -> str` | The text version of a saved file ("" if none). Only for files of this dossier. |
+| `await ctx.ask_model(instructions, input, schema=None)` | One model call (`llm.call_model`). Every string in the answer that copies 40+ characters from `input` is dropped, and strings are cut to 500 chars (or the schema's `maxLength`). Use it for any model-written text that will be stored. |
+| `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6)` | A small ADK agent (`llm.make_agent` + `llm.run_agent`) for tools that are agents. `tools` are names of registered tools; their calls go through the same wrapper, caps and activity log. Timeout = time left. Returns `AgentRun`. |
+| `await ctx.call_tool(tool_name, **args) -> dict` | Calls another registered tool through the wrapper (example: tool 8 calls `ask_pdf`). |
+| `ctx.log(text)` | Sets this call's activity `detail` (cut to 200 chars). Code-made text only: counts, reasons. Never page, snippet or model text. |
+
+Long-term memories (site manuals, state sites, blocked sites) are plain functions in `app/memory.py`
+(4B.4); a tool imports them directly.
+
+### 4B.4 Memories (6b)
+All in the same SQLite file as today (`DATABASE_PATH`). Created by `store.init_db()`.
+
+| # | Memory | Table | Scope | Written by | Read by |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Expert profile | `findings` + `gaps` (existing) | per expert (dossier) | every tool via `ctx.add_finding` / `ctx.add_gap` | `ctx.findings()`, GET /dossiers/{id}/findings |
+| 2 | Site manuals | `site_manuals` | long term, all experts | tool 3 | tools 3, 6, 7 |
+| 3 | Sites per state | `state_sites` | long term | tool 2 | tools 2, 6 |
+| 4 | Blocked sites | `blocked_sites` | long term | any tool (`memory.block_site`), mostly 3, 6, 7 | `ctx.fetch_ok` (every fetch) |
+| 5 | Files + notes | `files` (+ bytes on disk) | per expert | `ctx.save_file` (tool 7), note by tool 5 | tools 4, 5, 8 |
+| - | Activity log | `activity` | per job | the wrapper only | GET /jobs/{id} |
+
+Columns:
+- `site_manuals(domain PK, how_to, login_notes, updated_at, job_id)`: `how_to` at most 2,000
+  chars (search URL pattern, which fields, what the results look like, needs JavaScript or not);
+  `login_notes` at most 500 chars ("login needed: yes/no, where"), never a credential.
+- `state_sites(state, domain, what, reliability, notes, updated_at; PK state+domain)`: `state` is a
+  two-letter code; `what` = what the site holds ("county trial court dockets"); `reliability` is
+  `high | medium | low | unknown`.
+- `blocked_sites(domain PK, reason, url, noted_at)`: `reason` is `paywall | captcha | login | terms`.
+  No expiry in v1 (delete the row by hand). The gotcha 2 domains are constants in code, not rows.
+- `files(file_id PK, dossier_id, source_url, path, text_path, mime, bytes, retrieved_at, note_md)`:
+  `note_md` at most 3,000 chars (tool 5).
+- `activity(job_id, seq, tool, label, status, args, detail, started_at, finished_at; PK job_id+seq)`.
+
+Functions in `app/memory.py`: `manual(domain)`, `save_manual(domain, how_to, login_notes="")`,
+`sites_in(state)`, `save_state_site(state, domain, what, reliability, notes="")`,
+`blocked(domain) -> reason | None`, `block_site(domain, reason, url)`, `files(dossier_id)`,
+`file(file_id)`, `set_file_note(file_id, note_md)`. Domains are stored lower-case without `www.`.
+Every text write runs `no_secret(text)`: it raises on anything that looks like a password, token,
+API key or card number (labelled `password:`/`token=`..., or 12+ digits in a row), so the tool call
+fails instead of storing it (gotcha 45).
+
+Downloaded files and their text versions live only on the server's disk (`data/` is gitignored). They
+are never put in findings, never in API responses, never committed (gotcha 8). Meta web search
+snippets are still never stored (gotcha 15).
+
+### 4B.5 The main agent and the job
+- `app/main_agent.py`: `async def research(job_id, dossier_id, expert, testimony_list=None)`. Builds
+  `Ctx` and `Run` (`seconds=RESEARCH_SECONDS`, caps from the registry), wraps every registered tool,
+  makes one agent (`llm.make_agent("main_agent", INSTRUCTIONS, tools=...)`) and runs it with
+  `llm.run_agent(max_llm_calls=MAX_AGENT_CALLS, timeout=time left)`. Its final text is thrown away;
+  only what tools saved counts.
+- Config (`app/config.py`): `RESEARCH_SECONDS = 600` (decision 8), `MAX_AGENT_CALLS = 40`. Starting
+  values, tuned in the live runs.
+- First message to the agent: the expert block (name, field, location, affiliations, ids, and the
+  titles + URLs of the candidate's evidence), the cases from the pasted `testimony_list` (in memory
+  only, never stored, as today), and the tool list. Long-term memories are not pasted in; tools read them.
+- Instructions, in short: "Research this one expert's professional record: testimony, court rulings
+  about them, publications, retractions, licences and discipline. Use only tools. Start with court
+  records, publications, the retraction check, the exclusion check and web search, then follow leads
+  (a case on a CV, a state court site, a file worth reading). Professional records only: never private
+  life, family, home address or health. Never log in, never get past a robot check or a paywall.
+  Reply DONE when nothing new is likely."
+- Job end: DONE, `step_limit` or `time_limit` -> job `done` (the step detail says which). A
+  `ModelError` -> step `failed` + gap; the job is `failed` only if no tool call finished, otherwise
+  `done` with what was saved. A crash outside the agent fails the job, as today.
+- `jobs.RESEARCH_STEPS` becomes one row: `("main_agent", "Research agent")`.
+
+### 4B.6 Activity log and the GET /jobs/{id} change (6c; for the frontend team)
+Every job response gains an `activity` list (always `[]` for candidate searches). The research job
+has one step row instead of nine. Example (made-up values):
+
+```json
+{
+  "job_id": "job_02", "kind": "research", "status": "running",
+  "progress": {"done": 0, "total": 1},
+  "steps": [{"key": "main_agent", "label": "Research agent", "status": "running", "detail": "6 tool calls", "finished_at": null}],
+  "activity": [
+    {"seq": 1, "tool": "court_records", "label": "Court records", "status": "done", "args": {},
+     "detail": "3 opinions kept, 2 same-name skipped", "started_at": "2026-10-29T15:01:02Z", "finished_at": "2026-10-29T15:01:20Z"},
+    {"seq": 2, "tool": "sites_for_state", "label": "Sites for a state", "status": "done", "args": {"state": "MI"},
+     "detail": "4 sites (from memory)", "started_at": "2026-10-29T15:01:21Z", "finished_at": "2026-10-29T15:01:21Z"},
+    {"seq": 3, "tool": "read_web_page", "label": "Read a web page", "status": "refused", "args": {"url": "https://example.gov/search"},
+     "detail": "blocked site: captcha", "started_at": "2026-10-29T15:01:22Z", "finished_at": "2026-10-29T15:01:22Z"},
+    {"seq": 4, "tool": "download_file", "label": "Download a file", "status": "running", "args": {"url": "https://example.edu/cv.pdf"},
+     "detail": null, "started_at": "2026-10-29T15:01:23Z", "finished_at": null}
+  ],
+  "result": null, "error": null
+}
+```
+- `status`: `running`, `done`, `refused`, `skipped`, `failed`. Rows are in `seq` order; the full
+  list comes back on every poll.
+- `label` is the tool's fixed label; `detail` is code-made text; `args` are the model's arguments
+  after checking, string values cut to 100 chars.
+- When done, the step detail says why it stopped ("agent finished", "time limit (10 min)", "step
+  limit"). `result` stays `{"kind": "dossier", "id": ...}`; GET /dossiers/{id}/findings keeps working.
+- Findings change (see 4B.11 D2): `collector` holds the tool name; `kind` is an open string (the
+  current kinds stay for tools 1, 9-12; new kinds are listed on each card).
+
+### 4B.7 What stays in code (6d)
+- Per-tool caps and the job deadline (`Run`); `MAX_AGENT_CALLS` (ADK `max_llm_calls`); `RESULT_MAX`.
+- Argument checking against type hints (`checked_args`); refusals and errors are fixed texts.
+- Banned domains (gotcha 2) on every saved URL and every fetch; `blocked_sites` and API hosts on
+  every fetch (`ctx.fetch_ok`).
+- No logins, no CAPTCHA or paywall bypass, Firecrawl `proxy: basic` (gotchas 4, 24); a site that
+  asks for any of these goes to `blocked_sites`.
+- Copy-check (40+ chars) and length caps on every stored model text (`ctx.ask_model`).
+- No snippet or page text in findings, gaps, memories or activity rows (gotcha 15); files only on disk.
+- `no_secret` on every memory write; nothing secret in a prompt, reply or log (gotcha 45).
+- The expert is fixed by the job: tools 1, 9, 10, 11 take no person argument; tool 12 queries must
+  contain the expert's full name; surname-only court matches are never kept (gotcha 13).
+- Rate limits, caches and budgets stay in `app/sources/*` (gotchas 5-7, 12); wording rules of
+  gotcha 3 (never "background check").
+- Gaps, step rows and activity rows are written by code only.
+
+### 4B.8 Test kit (6e)
+- `FakeAdkModel` (exists, `tests/fakes.py`): a script of turns, e.g.
+  `adk_model.script = [call("court_records"), call("web_search", query="...", topic="testimony"), "DONE"]`.
+- `tool_ctx` fixture (new, `tests/fakes.py`): a `Ctx` on the test's temp SQLite with a synthetic
+  expert (Alex Rivera), a job and a dossier, 60 s on the clock, registry caps. Helpers:
+  `run_tool(ctx, "tool_name", **args)` calls through the wrapper (so caps, refusals and activity
+  are real); `add_test_file(ctx, text, mime="application/pdf") -> file_id` for tools 4, 5, 8.
+- Fake sources: the existing `sources` / `research_sources` fixtures (fake HTTP routes, `FakeModel`
+  for `ask_model`). Unknown hosts answer 599, so a test can never reach a live site (gotcha 9).
+- Every tool test must cover: (1) happy path with fake data: findings saved with URL and the right
+  `kind`, reply under `RESULT_MAX`; (2) the source failing -> `TOOL_FAILED` or a skip, activity row
+  and gap; (3) a gotcha 2 or `blocked_sites` URL refused, if the tool takes or follows URLs;
+  (4) the `PAGE_TEXT` marker in fake pages never reaches findings, memories or activity rows;
+  (5) its memory reads and writes, if any.
+
+### 4B.9 Tool cards (6f)
+Common to every card: the contract in 4B.2, the guards in 4B.7, a test as in 4B.8. Legal rules for
+all: gotcha 2 (banned sites), 3 (professional records only, never "background check"), 4 (no logins,
+CAPTCHA bypass, IP rotation or fake accounts), 8 (no real people's data in the repo; fixtures are
+synthetic), 15 (no snippet or page text stored). Caps are per job, starting values.
+
+**Tool 1: court records (core, M7).** File `app/tools/courtlistener.py`. Two tools.
+- `court_records()`: label "Court records", cap 1. CourtListener opinions naming the expert near
+  "expert" (`courtlistener.search_opinions(ctx.expert.display_name)`), then passages for the newest
+  `MAX_OPINIONS` (6) (`opinion_passages`). Code scores each opinion as the same person (0-100):
+  +50 opinion URL is in the candidate's evidence, +25 full name in the passages, +15 a field word near
+  the name, +10 court in the expert's state. **Surname only** (no full name in passages and not in
+  evidence): never kept (gotcha 13). Kept if score >= 40: level `high` (>= 75) or `medium`. Saves kind
+  `court_opinion` (facts as today plus `match: {score, level, reasons}`); skipped ones are counted in a gap.
+  Reply: `{"opinions": [{"ref", "case_name", "court", "date_filed", "score", "level", "passage"}], "skipped_same_name": n}`.
+- `court_case(case_name: str, court: str = "", year: int = 0)`: label "Court case lookup", cap 6.
+  Looks up one named case for the expert (`courtlistener.find_case`). Found -> kind `case_check`
+  (confidence `high`); not found -> nothing saved, reply `{"found": false}` (an invented case
+  name never becomes a record; replaces gotcha 39's rule).
+- Memories: profile. Legal: gotchas 5, 11 (no token -> `SourceSkipped`), 13, 23. CourtListener
+  budget stays in the source client.
+- Done when: both tools pass their tests; surname-only never kept; live Gary Stanton run keeps
+  Taylor v. Moore with a score.
+
+**Tool 2: sites for a state (engineer, T2).** File `app/tools/state_sites.py`.
+`sites_for_state(state: str)`, label "Sites for a state", cap 3.
+- Purpose: which public websites hold court, licence or discipline records for a US state.
+- Reads `memory.sites_in(state)`; if there are none, finds them with Meta web search
+  (`llm.call_model(web_search=True)`) plus `ctx.ask_model` to label each site (`what`,
+  `reliability`), and saves them (`memory.save_state_site`). Official `.gov` and court sites first.
+- Arguments: two-letter code or full state name (normalise with `app.sources.state_of`); anything
+  else -> `refuse("unknown state")`.
+- Reply: `{"state", "sites": [{"domain", "what", "reliability", "blocked": reason|null}], "from_memory": bool}`.
+  No findings (a site list is not a fact about the expert).
+- Legal: drop gotcha 2 domains; no paid people-search sites; nothing saved from snippets but domain,
+  label and our own notes.
+- Done when: the second call for the same state uses memory (no model call, test); gotcha 2 domains
+  never saved (test).
+
+**Tool 3: site guide (engineer, T3).** File `app/tools/site_guide.py`.
+`site_guide(domain: str)`, label "Site guide", cap 4.
+- Purpose: learn how to search one website and remember it (memory 2).
+- Reads `memory.manual(domain)`; if missing, reads up to 3 pages of the site (Firecrawl
+  `scrape`, after `ctx.fetch_ok`), then `ctx.ask_model` writes `how_to` (search URL pattern,
+  fields, result format, JavaScript needed). Saves `memory.save_manual`. A site that asks for a
+  login, a payment or a robot check -> `memory.block_site(domain, reason, url)`.
+- **Logins: the decision belongs to this tool's engineer, after a legal check per site (gotcha 4, the
+  CFAA row in SOURCES_AND_FLOW).** Until then: no logins, `login_notes` holds only "login needed: yes/no,
+  where", never a credential (gotcha 45; `no_secret` enforces it).
+- Reply: `{"domain", "how_to", "login_needed": bool, "blocked": reason|null, "from_memory": bool}`.
+- Done when: manual saved and reused (test); a fake captcha page blocks the domain (test); a secret
+  in `login_notes` is refused (test).
+
+**Tool 4: ask a PDF (engineer, T4).** File `app/tools/ask_pdf.py`.
+`ask_pdf(file_id: str, question: str)`, label "Ask a file", cap 10.
+- Purpose: answer one question from one saved file (memory 5).
+- Uses `ctx.file_text(file_id)` (the text version tool 7 saved) and `ctx.ask_model` (answer at most
+  1,000 chars, copy-checked, so no long verbatim quotes). If the answer is a fact about the expert,
+  saves kind `file_fact` (url = the file's `source_url`, confidence `low`, note "from a downloaded
+  file; verify at the source", facts `{file_id, question, answer}`).
+- Reading PDFs without a text version: the engineer's choice; a new dependency (e.g. `pypdf`) needs
+  the lead's OK.
+- Reply: `{"answer", "ref": ref|null}`; unknown or other dossier's `file_id` -> `refuse("unknown file")`.
+- Done when: answer + finding from a test file; copied text dropped (test); unknown file refused (test).
+
+**Tool 5: file note (engineer, T5).** File `app/tools/note_file.py`.
+`note_file(file_id: str)`, label "Write a file note", cap 10.
+- Purpose: a short markdown note per file so nobody rereads it (memory 5).
+- `ctx.ask_model` on `ctx.file_text(file_id)`: what the file is, what it says about the expert's
+  professional work (cases, roles, dates, employers, licences), anything to follow up. Code adds the
+  header: source URL, retrieved date. At most 3,000 chars, copy-checked. Saves `memory.set_file_note`.
+- Reply: `{"file_id", "note_md"}`. No findings (tool 8 turns notes into findings).
+- Done when: note saved, header made by code, under 3,000 chars (test); copied text dropped (test).
+
+**Tool 6: site search (engineer, T6).** File `app/tools/site_search.py`.
+`site_search(domain: str, query: str)`, label "Search a website", cap 8.
+- Purpose: search one website for the expert, a case number, a state or another clue; return hits with URLs.
+- Method is the engineer's choice: the site manual's search URL (memory 2) scraped with Firecrawl, or
+  a Firecrawl search limited to the domain. `ctx.fetch_ok` before every fetch. A new Firecrawl call
+  goes in a new file `app/sources/firecrawl_search.py` (owned by T6).
+- Hits that name the expert (full name) or the asked case -> kind `site_hit` (url = the hit's page,
+  confidence `low`, facts written by code or by `ctx.ask_model`, never page text).
+- Reply: `{"hits": [{"ref", "title", "url"}], "used_manual": bool}`.
+- Legal: gotchas 1, 24, 25 (Firecrawl checks), 4 (a search behind login or captcha -> `block_site`).
+- Done when: hits saved with URLs (test); blocked/banned domain refused (test); no page text stored (test).
+
+**Tool 7: web reader and download (engineer, T7).** File `app/tools/web_reader.py`. Two tools.
+- `read_web_page(url: str)`: label "Read a web page", cap 8. Firecrawl `scrape` after
+  `ctx.fetch_ok`; reply `{"url", "title", "text"}` with text cut so the reply fits `RESULT_MAX`.
+  Nothing saved; a login, paywall or captcha page -> `memory.block_site` and a refusal.
+- `download_file(url: str)`: label "Download a file", cap 10. Saves the file with `ctx.save_file`
+  plus a text version (Firecrawl markdown for pages and PDFs, `MAX_PDF_PAGES`). Reply `{"file_id", "mime", "pages"}`.
+- May add to `app/sources/firecrawl.py` (T7 owns additions there); plain downloads use `app/http.py`.
+- Legal: gotchas 24, 25 (status code, redirect re-check), 4.
+- Done when: page read without storing text (test); file + text saved under `data/files/` (test);
+  redirect to a banned domain refused (test); captcha page blocks the domain (test).
+
+**Tool 8: file review (engineer, T8).** File `app/tools/review_files.py`.
+`review_files()`, label "Review files", cap 2.
+- Purpose: go through this expert's files and find new leads (cases, other name forms, employers,
+  licences, URLs worth reading).
+- Reads `memory.files(ctx.dossier_id)` and their notes; may ask questions with
+  `ctx.call_tool("ask_pdf", ...)` or run `ctx.sub_agent(..., tools=["ask_pdf"])`. Saves each lead as
+  kind `file_lead` (url = the file's `source_url`, confidence `low`).
+- Reply: `{"leads": [{"ref", "what", "kind": "case|name|employer|licence|url"}]}`.
+- Done when: leads from two test files saved with source URLs (test); runs with no files (reply empty).
+
+**Tool 9: publications (core, M8).** File `app/tools/openalex.py`.
+`publications()`, label "Publications", cap 1.
+- OpenAlex author records and works for the candidate's OpenAlex ids (first 3, merged, gotcha 12):
+  kinds `author_stats` and `work`, as today. No ids -> `SourceSkipped("no OpenAlex id")`.
+- Reply: counts, h-index, 10 newest works (`ref`, title, year, doi). Legal: gotchas 6, 12.
+
+**Tool 10: retraction check (core, M8).** File `app/tools/crossref.py`.
+`retraction_check()`, label "Retraction check", cap 2.
+- Crossref for the newest 50 saved `work` findings with a DOI, plus OpenAlex's `is_retracted` flag:
+  kind `retraction`, as today. No works yet -> `refuse("no works yet: call publications first")`.
+- Legal: gotcha 7 (`mailto`, backoff stays in the client).
+
+**Tool 11: exclusion check (core, M8).** File `app/tools/leie.py`.
+`exclusion_check()`, label "OIG exclusion list", cap 1.
+- OIG LEIE name matches, other-state matches dropped when the state is known: kind
+  `leie_possible_match`, confidence `low`, "possible match" note, as today. Known problem: the
+  live ConnectError on the CSV download (PLAN known problems).
+
+**Tool 12: web search (core, M8).** File `app/tools/web_search.py`.
+`web_search(query: str, topic: Literal["testimony", "credentials", "other"])`, label "Web search", cap 6.
+- Meta web search + fact step (`websearch.search_facts`). The query must contain the expert's full
+  name (`has_full_name`), may not name a gotcha 2 site, at most 200 chars. Saves URL + title + our
+  facts only: kinds `web_testimony`, `web_credential`, `web_fact`, confidence `low`, "verify" note.
+- Legal: gotchas 14, 15, 22.
+
+Core tools 9-12 are done when: each has a test with fake sources, keeps the guards it has today, and
+shows in the activity log of the live Stanton run (M8 8b, 8e).
+
+### 4B.10 File split (6g)
+**M7, Builder 1 (framework), first:** `app/tools/__init__.py` (registry, wrapper, `Ctx`),
+`app/main_agent.py`, `app/memory.py`, `app/store.py` (tables, `add_finding`, `add_gap`, activity),
+`app/models.py` (`Job.activity`, `ActivityRow`, open `collector`/`kind`), `app/jobs.py` (research
+runs the main agent), `app/config.py` (two numbers), `app/main.py` (only if the job route needs it),
+`tests/fakes.py` (`tool_ctx`, `run_tool`, `add_test_file`), new `tests/test_tools_framework.py` and
+`tests/test_memory.py`, `tests/test_research_api.py` and `tests/test_flow.py` (research expectations
+only). A test-only tool lives in the test, not in `app/tools/`.
+**M7, Builder 2 (after 1):** `app/tools/courtlistener.py`, `tests/test_tool_courtlistener.py`.
+
+From M7 on the research job runs the main agent, so until M8 lands it has only tool 1. `app/collectors.py`
+stays importable but unused until M8 removes it.
+
+**M8, in parallel:** Builder 3: `app/tools/openalex.py`, `app/tools/crossref.py` + tests. Builder 4:
+`app/tools/leie.py`, `app/tools/web_search.py` + tests. After both pass, Builder 4 removes
+`app/collectors.py`, `tests/test_collectors.py` and the collector parts of `tests/test_sources_m3.py`.
+Lead: DESIGN 4.2-4.4 and 4A marked replaced.
+
+**Engineer tracks (after M7 is committed):** each owns its tool file + `tests/test_tool_<file>.py`:
+T2 `state_sites.py`, T3 `site_guide.py`, T4 `ask_pdf.py`, T5 `note_file.py`, T6 `site_search.py` (+ new
+`app/sources/firecrawl_search.py`), T7 `web_reader.py` (+ additions to `app/sources/firecrawl.py`), T8
+`review_files.py`.
+
+**Frozen after M7:** `app/tools/__init__.py`, `app/main_agent.py`, `app/memory.py`, `app/store.py`,
+`app/models.py`, `tests/fakes.py`, `tests/conftest.py`. A change there goes through the lead. Read-only
+for tool builders: `app/sources/*` (except the two above), `app/llm.py`, `app/evidence.py`, `app/http.py`.
+
+### 4B.11 Decisions (approved 2026-10-29) and open points
+- **D1.** Downloaded files and their text versions are kept on the server's disk (`data/files/`,
+  gitignored), an exception to "page text is never stored". The database holds only metadata and our
+  note; files never appear in findings or API responses. Meta snippets are still never stored.
+- **D2.** Findings: `collector` holds the tool name (was testimony/publications/credentials); `kind`
+  becomes an open string. Current kinds stay for tools 1, 9-12. The frontend team must be told.
+- **D3.** Tool 1 is plain code with a code-made same-person score (no AI judge) plus a case lookup.
+  Tools 1, 9, 10, 11 take no person argument: the agent cannot point them at someone else.
+- **D4.** Long-term memories are read by tools, not pasted into the agent's prompt.
+- **D5.** The research job ends `done` with gaps; it fails only if the model fails before any tool
+  call finishes.
+- **D6.** From M7 to M8 a research run has only tool 1 (old collectors unused, removed in M8).
+- **D7.** Starting numbers: 40 model calls, the per-tool caps above, `RESULT_MAX` 8,000 chars, files
+  20 MB, 30 files per job.
+- Open (not for the core): end output of part 2; owners of T2-T8; logins policy (tool 3 engineer,
+  legal check first).
 
 ## 5. Meta Model API (1d)
 
