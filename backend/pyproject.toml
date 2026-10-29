@@ -1,0 +1,26 @@
+[project]
+name = "expert-witness-api"
+version = "0.1.0"
+description = "Expert witness investigation platform: name in, cited dossier out."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]>=0.115",
+    "google-adk>=2.13.0",
+    "litellm>=1.106.6",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
