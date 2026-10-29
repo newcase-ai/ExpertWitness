@@ -10,8 +10,11 @@ from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.genai import types
 from pydantic import Field
 
-from app import collectors, http, llm
+from app import collectors, http, jobs, llm, store
+from app.evidence import Run
+from app.models import Candidate
 from app.sources import courtlistener, crossref, firecrawl, leie, openalex, websearch
+from app.tools import REGISTRY, Ctx, tool
 
 NAME = "Alex Rivera"
 
@@ -300,3 +303,48 @@ def research_sources_fixture(monkeypatch):
         return calls
 
     return setup
+
+
+# Main agent tools (DESIGN 4B.8): a Ctx on the test's temp SQLite, and helpers.
+
+EXPERT = Candidate(
+    display_name=NAME, summary="Synthetic toxicologist.", field="toxicology", location="Ohio, US",
+    affiliations=["Example State University"],
+    evidence=[{"source": "web", "url": "https://example.edu/faculty/rivera", "title": "Faculty page"}],
+)
+TEST_FILE_URL = "https://example.edu/files/rivera-cv.pdf"
+
+
+@pytest.fixture(name="tool_ctx")
+def tool_ctx_fixture():
+    """A Ctx for the synthetic expert (Alex Rivera) with a research job, a dossier, 60 s on the
+    clock and the registry's caps. Tools run through `run_tool`, so caps and activity rows are real."""
+    job_id = store.create_job("research", jobs.RESEARCH_STEPS)
+    dossier_id = store.create_research("cand_test", job_id)
+    run = Run(seconds=60, caps={tool_name: t.cap for tool_name, t in REGISTRY.items()})
+    return Ctx(job_id=job_id, dossier_id=dossier_id, expert=EXPERT, run=run)
+
+
+async def run_tool(ctx: Ctx, tool_name: str, **args) -> dict:
+    """Call a registered tool through the wrapper, as the main agent does."""
+    return await ctx.call_tool(tool_name, **args)
+
+
+def add_test_file(ctx: Ctx, text: str, mime: str = "application/pdf") -> str:
+    """Save a synthetic downloaded file with `text` as its text version; returns the file_id."""
+    return ctx.save_file(TEST_FILE_URL, b"%PDF-1.4 synthetic test file", mime, text=text)
+
+
+@pytest.fixture(name="register_tool")
+def register_tool_fixture():
+    """register(fn, label=..., cap=...) adds a test-only tool; it is removed after the test."""
+    added = []
+
+    def register(fn, label="Test tool", cap=3):
+        tool(label=label, cap=cap)(fn)
+        added.append(fn.__name__)
+        return fn
+
+    yield register
+    for tool_name in added:
+        REGISTRY.pop(tool_name, None)

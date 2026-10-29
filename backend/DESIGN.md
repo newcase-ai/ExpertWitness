@@ -848,7 +848,8 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   `MAX_OPINIONS` (6) (`opinion_passages`). Code scores each opinion as the same person (0-100):
   +50 opinion URL is in the candidate's evidence, +25 full name in the passages, +15 a field word near
   the name, +10 court in the expert's state. **Surname only** (no full name in passages and not in
-  evidence): never kept (gotcha 13). Kept if score >= 40: level `high` (>= 75) or `medium`. Saves kind
+  evidence): never kept (gotcha 13). Kept if score >= 25: level `high` (>= 75), `medium` (>= 40) or
+  `low` (full name only, note "full name only; verify it is the same person"; user, 2026-10-29). Saves kind
   `court_opinion` (facts as today plus `match: {score, level, reasons}`); skipped ones are counted in a gap.
   Reply: `{"opinions": [{"ref", "case_name", "court", "date_filed", "score", "level", "passage"}], "skipped_same_name": n}`.
 - `court_case(case_name: str, court: str = "", year: int = 0)`: label "Court case lookup", cap 6.

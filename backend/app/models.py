@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validat
 
 JobStatus = Literal["queued", "running", "done", "failed"]
 StepStatus = Literal["pending", "running", "done", "failed", "skipped"]
+ActivityStatus = Literal["running", "done", "refused", "skipped", "failed"]
 EvidenceSource = Literal["openalex", "courtlistener", "web"]
 # Strongest first; candidates are ranked in this order (app/agents.py).
 ExpertSignal = Literal["court_opinion_expert", "expert_directory", "web_expert_witness"]
@@ -131,6 +132,19 @@ class Progress(BaseModel):
     total: int
 
 
+class ActivityRow(BaseModel):
+    """One tool call of the main agent (DESIGN 4B.6). Written by the tool wrapper only."""
+
+    seq: int
+    tool: str
+    label: str
+    status: ActivityStatus
+    args: dict = {}
+    detail: str | None = None
+    started_at: str
+    finished_at: str | None = None
+
+
 class JobResult(BaseModel):
     kind: Literal["dossier", "candidate_search"]
     id: str
@@ -147,6 +161,7 @@ class Job(BaseModel):
     steps: list[JobStep]
     result: JobResult | None = None
     error: str | None = None
+    activity: list[ActivityRow] = []  # always [] for candidate searches
 
 
 # Dossier sources (used from M3 on)
@@ -160,13 +175,7 @@ class Source(BaseModel):
     retrieved_at: str
 
 
-# Research job (M3): raw findings from the collectors, before the dossier is written
-
-Collector = Literal["testimony", "publications", "credentials"]
-FindingKind = Literal[
-    "court_opinion", "web_testimony", "work", "retraction", "author_stats", "leie_possible_match",
-    "web_credential", "page_testimony_case", "page_credential", "case_check",
-]
+# Research job: raw findings saved by the tools (the expert profile), before the dossier is written
 TESTIMONY_LIST_MAX = 20_000  # characters of a pasted testimony list (parsed by the AI, never stored)
 
 
@@ -187,8 +196,10 @@ class ResearchStarted(BaseModel):
 
 class Finding(BaseModel):
     finding_id: str = ""  # assigned by app/store.py when saved
-    collector: Collector
-    kind: FindingKind
+    # Open strings (DESIGN 4B.11 D2): `collector` is the tool name, `kind` is listed on each tool card.
+    # The M3 collectors still use testimony/publications/credentials until M8 removes them.
+    collector: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
     title: str
     url: str = Field(min_length=1)
     source_type: SourceType

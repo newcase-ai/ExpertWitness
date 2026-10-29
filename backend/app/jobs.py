@@ -1,9 +1,8 @@
 """Background jobs: an asyncio task in the same process, progress kept in SQLite."""
 
 import asyncio
-import time
 
-from app import agents, collectors, store
+from app import agents, llm, main_agent, store
 from app.models import Candidate
 
 CANDIDATE_STEPS = [
@@ -13,17 +12,7 @@ CANDIDATE_STEPS = [
     ("group_candidates", "Grouping people"),
 ]
 
-RESEARCH_STEPS = [
-    ("courtlistener", "Court opinions"),
-    ("web_testimony", "Testimony on the web"),
-    ("openalex", "Publications"),
-    ("crossref", "Retraction check"),
-    ("oig_leie", "OIG exclusions"),
-    ("web_credentials", "Licence and board pages"),
-    ("read_pages", "Expert's own pages"),
-    ("cross_check", "Testimony list check"),
-    ("follow_up", "Following leads"),
-]
+RESEARCH_STEPS = [("main_agent", "Research agent")]  # DESIGN 4B.5
 
 _tasks: set[asyncio.Task] = set()  # keep references so running tasks are not garbage-collected
 
@@ -59,7 +48,7 @@ async def run_candidate_search(job_id: str, search_id: str, name: str, hints: di
 def start_research(candidate: Candidate, testimony_list: str | None = None) -> tuple[str, str, bool]:
     """Return (job_id, dossier_id, created). A queued/running job for the same candidate is reused
     (created=False). No await between the check and the insert, so two requests cannot both start.
-    `testimony_list` (pasted by the user) stays in memory; only the cases parsed from it are saved."""
+    `testimony_list` (pasted by the user) goes to the main agent in memory only; it is never stored."""
     if active := store.active_research(candidate.candidate_id):
         return *active, False
     job_id = store.create_job("research", RESEARCH_STEPS)
@@ -71,31 +60,22 @@ def start_research(candidate: Candidate, testimony_list: str | None = None) -> t
 
 
 async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testimony_list: str | None = None) -> None:
-    """Run the three collectors in parallel, then read the pages they found, then check the listed
-    cases, then let the follow-up agent chase leads, and save everything. Failed sources are gaps, so the job ends `done` even if every step
-    failed; only an unexpected crash fails it."""
+    """Run the main agent; its tools save findings and gaps as they go. DONE, the step limit or the
+    time limit end the job `done`. A model failure is a gap: the job fails only if no tool call
+    finished before it (DESIGN 4B.11 D5). Any other crash fails the job."""
     store.start_job(job_id)
-    started = time.monotonic()
-
-    def step(key: str, status: str, detail: str | None = None) -> None:
-        store.set_step(job_id, key, status, detail)
-
+    store.set_step(job_id, "main_agent", "running")
     try:
-        results = await asyncio.gather(
-            collectors.collect_testimony(candidate, step),
-            collectors.collect_publications(candidate, step),
-            collectors.collect_credentials(candidate, step),
-        )
-        pages = await collectors.collect_pages(candidate, [f for found, _ in results for f in found], step)
-        checks = await collectors.cross_check(candidate, pages[0], testimony_list, step)
-        results = [*results, pages, checks]
-        results.append(await collectors.follow_up(candidate, [f for found, _ in results for f in found], step,
-                                                  started))
-        store.save_findings(
-            dossier_id,
-            [f for found, _ in results for f in found],
-            [g for _, gaps in results for g in gaps],
-        )
+        try:
+            run = await main_agent.research(job_id, dossier_id, candidate, testimony_list)
+        except llm.ModelError as exc:
+            store.add_gap(dossier_id, "main_agent", str(exc))
+            store.set_step(job_id, "main_agent", "failed", str(exc))
+            if not store.tool_calls_finished(job_id):
+                store.finish_job(job_id, "failed", error=str(exc))
+                return
+        else:
+            store.set_step(job_id, "main_agent", "done", main_agent.stop_detail(run.stopped))
     except Exception as exc:  # noqa: BLE001 - any crash must mark the job failed
         store.finish_job(job_id, "failed", error=str(exc) or type(exc).__name__)
         return

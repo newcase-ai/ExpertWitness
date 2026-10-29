@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app import collectors, jobs, llm, store
+from app import collectors, llm
 from app.evidence import LIMIT_REACHED
 from app.models import Candidate, Evidence, Finding, Gap, Identifiers
 from app.sources import SourceSkipped, websearch
@@ -546,23 +546,3 @@ def test_model_failure_fails_the_step_with_fixed_text(research_sources, adk_mode
     findings, gaps, steps = follow([])
     assert steps["follow_up"] == ("failed", "Follow-up failed (ModelError)")
     assert gaps == [Gap(step="follow_up", reason="Follow-up failed (ModelError)")] and findings == []
-
-
-def test_research_job_runs_follow_up_last_and_saves_its_findings(research_sources, adk_model):
-    def search(name, queries, topic, context=None):  # only the loop's query finds the CV
-        return LOOP_SEARCH if queries == [QUERY] else RESEARCH_SOURCES["websearch.search_facts"]
-
-    research_sources({"websearch.search_facts": search})
-    assert jobs.RESEARCH_STEPS[-1] == ("follow_up", "Following leads")
-    adk_model.script = [call("web_facts", query=QUERY, topic="credentials"), "DONE"]
-    job_id = store.create_job("candidate_search", jobs.CANDIDATE_STEPS)
-    [cand] = store.save_candidates(store.create_search("Alex Rivera", None, job_id), [CANDIDATE], [])
-    job_id = store.create_job("research", jobs.RESEARCH_STEPS)
-    dossier_id = store.create_research(cand.candidate_id, job_id)
-    asyncio.run(jobs.run_research(job_id, dossier_id, cand))
-    job = store.get_job(job_id)
-    assert job.status == "done" and [s.key for s in job.steps][-1] == "follow_up"
-    assert job.steps[-1].status == "done" and job.steps[-1].detail == "1 leads followed"
-    assert "F1 | " in adk_model.seen[0].contents[0].parts[0].text
-    saved = store.get_research(dossier_id).findings
-    assert CV in [f.url for f in saved if f.kind == "web_credential"]  # the loop's finding is saved

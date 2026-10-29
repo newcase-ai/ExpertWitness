@@ -1,5 +1,6 @@
 """SQLite storage (stdlib sqlite3): jobs, searches, candidates, research runs and findings,
-URL cache, API call log."""
+URL cache, API call log, the main agent's activity log and memory tables (rows read and written
+by app/memory.py)."""
 
 import json
 import secrets
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from app.config import get_settings
 from app.models import (
+    ActivityRow,
     Candidate,
     CandidateSearch,
     FailedSource,
@@ -47,6 +49,26 @@ create table if not exists findings (
 );
 create table if not exists gaps (
     dossier_id text not null, position integer not null, step text not null, reason text not null
+);
+create table if not exists activity (
+    job_id text not null, seq integer not null, tool text not null, label text not null,
+    status text not null, args text not null, detail text, started_at text not null, finished_at text,
+    primary key (job_id, seq)
+);
+create table if not exists site_manuals (
+    domain text primary key, how_to text not null, login_notes text not null, updated_at text not null,
+    job_id text
+);
+create table if not exists state_sites (
+    state text not null, domain text not null, what text not null, reliability text not null,
+    notes text not null, updated_at text not null, primary key (state, domain)
+);
+create table if not exists blocked_sites (
+    domain text primary key, reason text not null, url text, noted_at text not null
+);
+create table if not exists files (
+    file_id text primary key, dossier_id text not null, source_url text not null, path text not null,
+    text_path text, mime text not null, bytes integer not null, retrieved_at text not null, note_md text
 );
 """
 
@@ -111,6 +133,7 @@ def get_job(job_id: str) -> Job | None:
         **row | {"result": json.loads(row["result"]) if row["result"] else None},
         steps=steps,
         progress=Progress(done=finished, total=len(steps)),
+        activity=activity(job_id),
     )
 
 
@@ -158,7 +181,10 @@ def finish_job(
 
 
 def fail_interrupted_jobs() -> int:
-    """At startup: jobs left queued/running by a stopped server are marked failed."""
+    """At startup: jobs left queued/running by a stopped server are marked failed (and their
+    running tool calls)."""
+    execute("update activity set status = 'failed', detail = 'interrupted by restart', finished_at = ?"
+            " where status = 'running'", (now(),))
     rows = execute("select job_id from jobs where status in ('queued', 'running')")
     for row in rows:
         finish_job(row["job_id"], "failed", error="interrupted by restart")
@@ -279,6 +305,39 @@ def save_findings(dossier_id: str, findings: list[Finding], gaps: list[Gap]) -> 
     return stored
 
 
+def add_finding(dossier_id: str, finding: Finding) -> str:
+    """Save one finding at once (the main agent's tools) and return its new `fnd_` id. The same
+    kind + URL again returns the existing id."""
+    rows = execute(
+        "select finding_id from findings where dossier_id = ? and json_extract(data, '$.kind') = ?"
+        " and json_extract(data, '$.url') = ?",
+        (dossier_id, finding.kind, finding.url),
+    )
+    if rows:
+        return rows[0]["finding_id"]
+    finding_id = new_id("fnd")
+    data = finding.model_copy(update={"finding_id": finding_id}).model_dump_json()
+    execute(
+        "insert into findings (finding_id, dossier_id, position, data) select ?, ?,"
+        " coalesce(max(position), -1) + 1, ? from findings where dossier_id = ?",
+        (finding_id, dossier_id, data, dossier_id),
+    )
+    return finding_id
+
+
+def add_gap(dossier_id: str, step: str, reason: str) -> None:
+    execute(
+        "insert into gaps (dossier_id, position, step, reason) select ?, coalesce(max(position), -1) + 1,"
+        " ?, ? from gaps where dossier_id = ?",
+        (dossier_id, step, reason, dossier_id),
+    )
+
+
+def findings(dossier_id: str) -> list[Finding]:
+    rows = execute("select data from findings where dossier_id = ? order by position", (dossier_id,))
+    return [Finding.model_validate_json(r["data"]) for r in rows]
+
+
 def get_research(dossier_id: str) -> ResearchFindings | None:
     rows = execute(
         "select r.*, j.status from research_runs r join jobs j using (job_id) where r.dossier_id = ?",
@@ -301,6 +360,44 @@ def get_research(dossier_id: str) -> ResearchFindings | None:
         findings=[Finding.model_validate_json(r["data"]) for r in findings],
         gaps=[Gap(step=r["step"], reason=r["reason"]) for r in gaps],
     )
+
+
+# Activity log (one row per main agent tool call, DESIGN 4B.6)
+
+
+def start_activity(job_id: str, tool: str, label: str, args: dict, status: str = "running",
+                   detail: str | None = None) -> int:
+    """Add a row and return its `seq`. A row that is not `running` is finished at once (refusals)."""
+    at = now()
+    rows = execute(
+        "insert into activity (job_id, seq, tool, label, status, args, detail, started_at, finished_at)"
+        " select ?, coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ?, ?, ? from activity where job_id = ?"
+        " returning seq",
+        (job_id, tool, label, status, json.dumps(args), detail, at, None if status == "running" else at,
+         job_id),
+    )
+    return rows[0]["seq"]
+
+
+def finish_activity(job_id: str, seq: int, status: str, detail: str | None = None) -> None:
+    execute(
+        "update activity set status = ?, detail = ?, finished_at = ? where job_id = ? and seq = ?",
+        (status, detail, now(), job_id, seq),
+    )
+
+
+def activity(job_id: str) -> list[ActivityRow]:
+    rows = execute("select * from activity where job_id = ? order by seq", (job_id,))
+    return [ActivityRow(**dict(r) | {"args": json.loads(r["args"])}) for r in rows]
+
+
+def tool_calls_finished(job_id: str) -> int:
+    """Tool calls that ran to an end (done, skipped or failed; refusals never ran)."""
+    rows = execute(
+        "select count(*) from activity where job_id = ? and status in ('done', 'skipped', 'failed')",
+        (job_id,),
+    )
+    return rows[0][0]
 
 
 # HTTP cache and API call log (CourtListener hour/day caps)

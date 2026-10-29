@@ -1,0 +1,49 @@
+"""The main agent (DESIGN 4B.5): one ADK agent with every registered tool researches the picked
+expert until it replies DONE or hits the step or time limit. Its final text is thrown away; only
+what the tools saved counts."""
+
+from app import config, llm
+from app.evidence import Run
+from app.models import Candidate
+from app.tools import REGISTRY, Ctx
+
+INSTRUCTIONS = """You research one expert witness's professional record: testimony, court rulings
+about them, publications, retractions, licences and discipline. Use only your tools; every fact
+comes from a tool. Start with court records, publications, the retraction check, the exclusion check
+and web search, then follow leads (a case on a CV, a state court site, a file worth reading).
+Professional records only: never private life, family, home address or health. Never log in, never
+get past a robot check or a paywall. When a tool says a limit is reached, stop using it.
+Reply DONE when nothing new is likely."""
+
+
+def stop_detail(stopped: str | None) -> str:
+    """The step detail when the agent stops: why it stopped."""
+    if stopped == "time_limit":
+        return f"time limit ({config.RESEARCH_SECONDS / 60:g} min)"
+    return "step limit" if stopped == "step_limit" else "agent finished"
+
+
+def first_message(expert: Candidate, testimony_list: str | None) -> str:
+    """The expert block, the user's pasted case list (in memory only, never stored) and the tools."""
+    lines = [f"Expert: {expert.display_name}"]
+    lines += [f"{label}: {value}" for label, value in (
+        ("Field", expert.field), ("Location", expert.location),
+        ("Affiliations", "; ".join(expert.affiliations)),
+        ("OpenAlex ids", ", ".join(expert.identifiers.openalex)), ("ORCID", expert.identifiers.orcid),
+    ) if value]
+    lines += ["", "Evidence from the candidate search:"]
+    lines += [f"- {e.title} ({e.url})" for e in expert.evidence]
+    if testimony_list:
+        lines += ["", "Cases the user listed (pasted text, not checked):", testimony_list]
+    lines += ["", "Tools:"] + [f"- {name}: {t.label}" for name, t in REGISTRY.items()]
+    return "\n".join(lines)
+
+
+async def research(job_id: str, dossier_id: str, expert: Candidate,
+                   testimony_list: str | None = None) -> llm.AgentRun:
+    """Run the main agent once. Raises llm.ModelError when the model fails."""
+    run = Run(seconds=config.RESEARCH_SECONDS, caps={name: t.cap for name, t in REGISTRY.items()})
+    ctx = Ctx(job_id=job_id, dossier_id=dossier_id, expert=expert, run=run)
+    agent = llm.make_agent("main_agent", INSTRUCTIONS, tools=[ctx.adk_tool(name) for name in REGISTRY])
+    return await llm.run_agent(agent, first_message(expert, testimony_list),
+                               max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())

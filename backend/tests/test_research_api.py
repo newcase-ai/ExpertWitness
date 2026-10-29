@@ -1,4 +1,5 @@
-"""POST /research, GET /jobs and GET /dossiers/{id}/findings with fake sources. Synthetic people only."""
+"""POST /research, GET /jobs and GET /dossiers/{id}/findings: the research job runs the main agent
+(FakeAdkModel scripts, test-only tools). Synthetic people only."""
 
 import asyncio
 import json
@@ -8,11 +9,11 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import collectors, jobs, store
+from app import jobs, store
 from app.main import app
 from app.models import Candidate
-from app.sources import SourceSkipped
-from tests.fakes import PAGE_TEXT, RESEARCH_SOURCES, research_sources_fixture  # noqa: F401 - pytest fixture
+from app.tools import Ctx
+from tests.fakes import PAGE_MARKDOWN, PAGE_TEXT, call, register_tool_fixture  # noqa: F401 - fixture
 from tests.test_api import wait_for_job
 
 PERSON = Candidate(
@@ -35,26 +36,37 @@ def candidate_id(client):
     return store.save_candidates(search_id, [PERSON], [])[0].candidate_id
 
 
-def wait_for(client, job_id, status):
-    for _ in range(200):
-        job = client.get(f"/jobs/{job_id}").json()
-        if job["status"] == status:
-            return job
-        time.sleep(0.01)
-    raise AssertionError(f"job never reached {status}")
+CASE_URL = "https://example.org/news/rivera-testimony"
 
 
-def test_research_flow(client, candidate_id, research_sources):
-    """3b + 3g: 202 at once, status moves queued -> running -> done; a double submit while running
-    gets the same ids (200); findings are 409 until the job is done."""
+@pytest.fixture
+def saving_tool(register_tool):
+    """A test-only tool that reads a fake page (in memory) and saves one finding."""
+
+    async def save_case(ctx: Ctx, case: str) -> dict:
+        """Save a case found on a page."""
+        page = PAGE_MARKDOWN  # page text: fine in memory and in the reply, never stored
+        ref = ctx.add_finding("web_testimony", f"Testimony in {case}", CASE_URL, facts={"case": case})
+        ctx.log("1 case saved")
+        return {"refs": [ref], "page": page}
+
+    return register_tool(save_case, label="Save a case")
+
+
+def test_research_flow(client, candidate_id, register_tool, saving_tool, adk_model):
+    """7e: 202 at once; while the agent's tool runs, GET /jobs/{id} shows one step row and the
+    activity row `running`; a double submit gets the same ids (200); findings are 409 until done."""
     gate = threading.Event()
 
-    async def slow_search(name):
-        while not gate.is_set():
+    async def hold(ctx: Ctx) -> dict:
+        """Wait (test only)."""
+        while not gate.is_set():  # gotcha 19: poll, never block the app's event loop
             await asyncio.sleep(0.01)
-        return RESEARCH_SOURCES["courtlistener.search_opinions"]
+        ctx.log("held")
+        return {"ok": True}
 
-    research_sources({"courtlistener.search_opinions": slow_search})
+    register_tool(hold, label="Hold")
+    adk_model.script = [call("save_case", case="Doe v. Example Co."), call("hold"), "DONE"]
     r = client.post("/research", json={"candidate_id": candidate_id})
     assert r.status_code == 202
     started = r.json()
@@ -62,10 +74,19 @@ def test_research_flow(client, candidate_id, research_sources):
     assert started["job_id"].startswith("job_") and started["dossier_id"].startswith("dos_")
     job_id, dossier_id = started["job_id"], started["dossier_id"]
 
-    job = wait_for(client, job_id, "running")
-    assert job["kind"] == "research" and job["progress"]["total"] == 9
-    assert [s["key"] for s in job["steps"]] == [k for k, _ in jobs.RESEARCH_STEPS]
-    assert next(s for s in job["steps"] if s["key"] == "courtlistener")["status"] == "running"
+    for _ in range(300):
+        job = client.get(f"/jobs/{job_id}").json()
+        if len(job["activity"]) == 2:
+            break
+        time.sleep(0.01)
+    assert job["status"] == "running" and job["progress"] == {"done": 0, "total": 1}
+    assert job["steps"] == [{"key": "main_agent", "label": "Research agent", "status": "running",
+                             "detail": "1 tool calls", "finished_at": None}]
+    first, second = job["activity"]
+    assert first["seq"] == 1 and first["tool"] == "save_case" and first["label"] == "Save a case"
+    assert first["status"] == "done" and first["detail"] == "1 case saved"
+    assert first["args"] == {"case": "Doe v. Example Co."} and first["finished_at"]
+    assert second["seq"] == 2 and second["status"] == "running" and second["finished_at"] is None
 
     again = client.post("/research", json={"candidate_id": candidate_id})
     assert again.status_code == 200
@@ -77,23 +98,18 @@ def test_research_flow(client, candidate_id, research_sources):
     gate.set()
     job = wait_for_job(client, job_id)
     assert job["status"] == "done" and job["result"] == {"kind": "dossier", "id": dossier_id}
-    assert job["progress"] == {"done": 9, "total": 9}
-    assert all(s["status"] == "done" for s in job["steps"])
+    assert job["progress"] == {"done": 1, "total": 1}
+    assert job["steps"][0]["status"] == "done" and job["steps"][0]["detail"] == "agent finished"
+    assert [a["status"] for a in job["activity"]] == ["done", "done"]
 
     body = client.get(f"/dossiers/{dossier_id}/findings").json()
     assert body["dossier_id"] == dossier_id and body["job_id"] == job_id
     assert body["candidate_id"] == candidate_id and body["status"] == "done"
-    kinds = {f["kind"] for f in body["findings"]}
-    assert kinds == {"court_opinion", "web_testimony", "work", "retraction", "author_stats",
-                     "leie_possible_match", "web_credential", "page_testimony_case", "page_credential",
-                     "case_check"}
-    assert PAGE_TEXT not in json.dumps(body)  # 3j: page text is never stored
-    for f in body["findings"]:  # 3c
-        assert f["finding_id"].startswith("fnd_") and f["url"] and f["retrieved_at"]
-        if f["source_type"] == "web":  # 3h
-            assert f["confidence"] == "low" and "verify" in f["note"]
-    assert "snippet" not in json.dumps(body).lower()  # 3h: no snippet key or text anywhere
-    assert {"step": "courtlistener", "reason": collectors.STATE_COURTS_GAP} in body["gaps"]
+    [finding] = body["findings"]
+    assert finding["collector"] == "save_case" and finding["kind"] == "web_testimony"
+    assert finding["url"] == CASE_URL and finding["source_type"] == "web"
+    assert finding["finding_id"].startswith("fnd_") and finding["retrieved_at"]
+    assert PAGE_TEXT not in json.dumps(body) and PAGE_TEXT not in json.dumps(job)
 
     # a finished job does not block a fresh run
     fresh = client.post("/research", json={"candidate_id": candidate_id})
@@ -101,47 +117,69 @@ def test_research_flow(client, candidate_id, research_sources):
     wait_for_job(client, fresh.json()["job_id"])
 
 
-def test_failing_collector_is_a_gap(client, candidate_id, research_sources):
-    """3d: one collector's sources fail; the job still ends done and the other findings are saved."""
-    research_sources({"openalex.author": RuntimeError("down"), "openalex.works": RuntimeError("down")})
+def test_candidate_search_job_has_empty_activity(client):
+    job_id = store.create_job("candidate_search", jobs.CANDIDATE_STEPS)
+    assert client.get(f"/jobs/{job_id}").json()["activity"] == []
+
+
+def test_model_failure_before_any_tool_fails_job(client, candidate_id, adk_model):
+    adk_model.script = [RuntimeError("SECRET provider text")]
     started = client.post("/research", json={"candidate_id": candidate_id}).json()
     job = wait_for_job(client, started["job_id"])
-    assert job["status"] == "done" and job["error"] is None
-    steps = {s["key"]: (s["status"], s["detail"]) for s in job["steps"]}
-    assert steps["openalex"] == ("failed", "OpenAlex failed (RuntimeError)")
-    assert steps["crossref"] == ("skipped", "no works to check")
-    body = client.get(f"/dossiers/{started['dossier_id']}/findings").json()
-    assert {f["collector"] for f in body["findings"]} == {"testimony", "credentials"}
-    assert {"step": "openalex", "reason": "OpenAlex failed (RuntimeError)"} in body["gaps"]
-
-
-def test_collector_crash_fails_job(client, candidate_id, research_sources, monkeypatch):
-    research_sources()
-
-    async def crash(candidate, step):
-        raise ValueError()
-
-    monkeypatch.setattr(collectors, "collect_publications", crash)
-    started = client.post("/research", json={"candidate_id": candidate_id}).json()
-    job = wait_for_job(client, started["job_id"])
-    assert job["status"] == "failed" and job["error"] == "ValueError" and job["result"] is None
+    assert job["status"] == "failed" and job["result"] is None
+    assert job["error"] == "model call failed (RuntimeError)"
+    assert job["steps"][0]["status"] == "failed" and "SECRET" not in json.dumps(job)
     r = client.get(f"/dossiers/{started['dossier_id']}/findings")
     assert r.json() == {"detail": f"findings not ready: job {started['job_id']} is failed"}
 
 
-def test_findings_survive_restart(candidate_id, research_sources):
-    """3f: findings are in the SQLite file, not in memory: a new app start reads them back."""
-    research_sources()
+def test_model_failure_after_a_tool_keeps_findings(client, candidate_id, saving_tool, adk_model):
+    """D5: the model fails after one tool call finished: the job is done with a gap."""
+    adk_model.script = [call("save_case", case="Doe v. Example Co."), RuntimeError("SECRET")]
+    started = client.post("/research", json={"candidate_id": candidate_id}).json()
+    job = wait_for_job(client, started["job_id"])
+    assert job["status"] == "done" and job["error"] is None
+    assert (job["steps"][0]["status"], job["steps"][0]["detail"]) == ("failed", "model call failed (RuntimeError)")
+    body = client.get(f"/dossiers/{started['dossier_id']}/findings").json()
+    assert len(body["findings"]) == 1
+    assert body["gaps"] == [{"step": "main_agent", "reason": "model call failed (RuntimeError)"}]
+
+
+def test_crash_outside_the_agent_fails_job(client, candidate_id, monkeypatch):
+    from app import main_agent
+
+    async def crash(*args):
+        raise ValueError()
+
+    monkeypatch.setattr(main_agent, "research", crash)
+    started = client.post("/research", json={"candidate_id": candidate_id}).json()
+    job = wait_for_job(client, started["job_id"])
+    assert job["status"] == "failed" and job["error"] == "ValueError" and job["result"] is None
+
+
+def test_findings_survive_restart(candidate_id, saving_tool, adk_model):
+    """3f: findings and activity are in the SQLite file: a new app start reads them back."""
+    adk_model.script = [call("save_case", case="Doe v. Example Co."), "DONE"]
     with TestClient(app) as client:
         started = client.post("/research", json={"candidate_id": candidate_id}).json()
-        wait_for_job(client, started["job_id"])
+        job = wait_for_job(client, started["job_id"])
         before = client.get(f"/dossiers/{started['dossier_id']}/findings").json()
     store._ready.clear()  # as in a new process: tables are re-checked on the same file
     with TestClient(app) as client:
         after = client.get(f"/dossiers/{started['dossier_id']}/findings")
         assert after.status_code == 200 and after.json() == before
-        assert client.get(f"/jobs/{started['job_id']}").json()["status"] == "done"
-    assert before["findings"] and before["gaps"]
+        assert client.get(f"/jobs/{started['job_id']}").json() == job
+    assert before["findings"] and job["activity"]
+
+
+def test_pasted_testimony_list_goes_to_the_agent_not_stored(client, candidate_id, adk_model, tmp_path):
+    """3k: the pasted list is in the agent's first message (memory only); never stored."""
+    pasted = "SYNTHETIC-PASTED-LIST 1. Poe vs. Demo LLC, Example County Court, 2017"
+    started = client.post("/research", json={"candidate_id": candidate_id, "testimony_list": pasted}).json()
+    assert wait_for_job(client, started["job_id"])["status"] == "done"
+    assert pasted in adk_model.seen[0].contents[0].parts[0].text
+    db = (tmp_path / "data" / "test.db").read_bytes()
+    assert b"SYNTHETIC-PASTED-LIST" not in db
 
 
 @pytest.mark.parametrize("body", [{}, {"candidate_id": 5}, {"candidate_id": "cand_x", "extra": 1}])
@@ -159,37 +197,8 @@ def test_errors(client, monkeypatch):
     assert r.status_code == 503 and r.json() == {"detail": "MODEL_API_KEY is not set"}
 
 
-def test_pasted_testimony_list_is_parsed_not_stored(client, candidate_id, research_sources, tmp_path):
-    """3k: the pasted list goes to one AI call; only parsed cases are saved, never the text."""
-    calls = research_sources()
-    pasted = "SYNTHETIC-PASTED-LIST 1. Poe vs. Demo LLC, Example County Court, 2017"
-    started = client.post("/research", json={"candidate_id": candidate_id, "testimony_list": pasted}).json()
-    job = wait_for_job(client, started["job_id"])
-    assert job["status"] == "done"
-    body = client.get(f"/dossiers/{started['dossier_id']}/findings").json()
-    checks = {f["title"]: f for f in body["findings"] if f["kind"] == "case_check"}
-    assert checks["Poe vs. Demo LLC"]["facts"]["listed_in"] == "testimony_list"
-    assert checks["Doe v. Example Co."]["facts"]["status"] == "found"
-    assert all(f["url"] and f["retrieved_at"] for f in checks.values())
-    assert any(pasted in args[1] for key, args, _ in calls if key == "llm.call_model")  # the AI saw it
-    assert "SYNTHETIC-PASTED-LIST" not in json.dumps(body)
-    db = (tmp_path / "data" / "test.db").read_bytes()
-    assert b"SYNTHETIC-PASTED-LIST" not in db and PAGE_TEXT.encode() not in db
-
-
 def test_testimony_list_too_long_is_422(client, candidate_id):
     r = client.post("/research", json={"candidate_id": candidate_id, "testimony_list": "x" * 20_001})
     assert r.status_code == 422
 
 
-def test_no_firecrawl_key_is_a_gap(client, candidate_id, research_sources):
-    """No Firecrawl key: the page reader is skipped (gap), the job still finishes done."""
-    research_sources({"firecrawl.scrape": SourceSkipped("FIRECRAWL_API_KEY is not set")})
-    started = client.post("/research", json={"candidate_id": candidate_id}).json()
-    job = wait_for_job(client, started["job_id"])
-    assert job["status"] == "done" and job["error"] is None
-    steps = {s["key"]: (s["status"], s["detail"]) for s in job["steps"]}
-    assert steps["read_pages"] == ("skipped", "FIRECRAWL_API_KEY is not set")
-    assert steps["cross_check"] == ("skipped", "no cases to check")
-    body = client.get(f"/dossiers/{started['dossier_id']}/findings").json()
-    assert {"step": "read_pages", "reason": "FIRECRAWL_API_KEY is not set"} in body["gaps"]
