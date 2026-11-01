@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Response
 
 from app import http, jobs, store
+from app.config import get_settings
 from app.models import (
     CandidateSearch,
     CandidateSearchRequest,
@@ -45,6 +46,8 @@ def health() -> dict[str, str]:
 
 @app.post("/candidate-searches", status_code=202)
 async def start_candidate_search(body: CandidateSearchRequest) -> CandidateSearchStarted:
+    if not get_settings().model_api_key:
+        raise HTTPException(503, "MODEL_API_KEY is not set")
     hints = body.hints.model_dump() if body.hints else None
     search_id, job_id = jobs.start_candidate_search(body.name, hints)
     return CandidateSearchStarted(search_id=search_id, job_id=job_id, status="queued")
@@ -76,6 +79,8 @@ def get_job(job_id: str) -> Job:
 async def start_research(body: ResearchRequest, response: Response) -> ResearchStarted:
     """202 for a new job; 200 with the same ids if one for this candidate is queued or running (a
     `testimony_list` sent with the repeat is ignored). The pasted list is never stored."""
+    if not get_settings().model_api_key:
+        raise HTTPException(503, "MODEL_API_KEY is not set")
     candidate = store.get_candidate(body.candidate_id)
     if candidate is None:
         raise HTTPException(404, "candidate not found")

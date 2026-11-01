@@ -64,20 +64,37 @@ def test_cache_and_call_log():
     assert store.calls_since("openalex", 3600) == 0
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "muse-spark-1.3-contributor",
+        "MUSE-SPARK-1.3-CONTRIBUTOR",
+        "Muse-Spark-Contributor-1.3 ",
+        "muse-spark-contributor-1.3",
+        "muse-spark-1.3-contributor\t",
+    ],
+)
+def test_contributor_model_refused(monkeypatch, name):
+    assert config.is_banned_model(name)
+    monkeypatch.setenv("MODEL_NAME", name)
+    with pytest.raises(ValueError):
+        config.get_settings()
+
+
 def test_model_name_trimmed(monkeypatch):
-    monkeypatch.setenv("MODEL_NAME", " gemini-3.8-flash ")
-    assert config.get_settings().model_name == "gemini-3.8-flash"
+    monkeypatch.setenv("MODEL_NAME", " muse-spark-1.3 ")
+    assert config.get_settings().model_name == "muse-spark-1.3"
+    assert not config.is_banned_model("muse-spark-1.3")
 
 
 def test_env_file_read_and_environment_wins(tmp_path, monkeypatch):
     env_file = tmp_path / "test.env"
-    env_file.write_text("# comment\nCOURTLISTENER_TOKEN='abc'\nMODEL_NAME=from-file\n")
+    env_file.write_text("# comment\nCOURTLISTENER_TOKEN='abc'\nMODEL_API_KEY=from-file\n")
     monkeypatch.setattr(config, "ENV_FILE", env_file)
     settings = config.get_settings()
     assert settings.courtlistener_token == "abc"
-    assert settings.model_name == "from-file"
-    monkeypatch.setenv("MODEL_NAME", "from-env")
-    assert config.get_settings().model_name == "from-env"
+    assert settings.model_api_key == "test-key"  # set in the real environment by conftest
+    assert settings.model_name == "muse-spark-1.3"
 
 
 def test_rate_limiter_spaces_calls():

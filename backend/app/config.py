@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ENV_FILE = Path(".env")
-DEFAULT_MODEL = "gemini-3.8-flash"
+DEFAULT_MODEL = "muse-spark-1.3"
 DEFAULT_DATABASE_PATH = "data/expert_witness.db"
 # Main agent (DESIGN 4B.5, 4B.11 D7): starting values, tuned in the live runs.
 RESEARCH_SECONDS = 4 * 60 * 60  # the research job's time budget: 4 hours
@@ -13,13 +13,13 @@ TOOL_CAP_SCALE = 10  # a research run may call each tool this many times its car
 
 @dataclass(frozen=True)
 class Settings:
+    model_api_key: str | None
     model_name: str
     courtlistener_token: str | None
     contact_email: str | None
     database_path: str
     firecrawl_api_key: str | None = None
     gcs_bucket: str | None = None  # downloaded files and their descriptions go here
-    google_cloud_project: str | None = None  # Vertex AI (Gemini)
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -35,6 +35,11 @@ def read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def is_banned_model(name: str) -> bool:
+    """Contributor models must never get personal data (Meta terms 6.2), in any spelling."""
+    return "contributor" in name.strip().lower()
+
+
 def get_settings() -> Settings:
     """Read settings on every call: real environment wins over `.env`; empty means unset."""
     env = read_env_file(ENV_FILE) | os.environ
@@ -42,12 +47,15 @@ def get_settings() -> Settings:
     def value(name: str) -> str | None:
         return (env.get(name) or "").strip() or None
 
+    model_name = value("MODEL_NAME") or DEFAULT_MODEL
+    if is_banned_model(model_name):
+        raise ValueError("MODEL_NAME must not be a contributor model (Meta terms 6.2)")
     return Settings(
-        model_name=value("MODEL_NAME") or DEFAULT_MODEL,
+        model_api_key=value("MODEL_API_KEY"),
+        model_name=model_name,
         courtlistener_token=value("COURTLISTENER_TOKEN"),
         contact_email=value("CONTACT_EMAIL"),
         database_path=value("DATABASE_PATH") or DEFAULT_DATABASE_PATH,
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
         gcs_bucket=value("GCS_BUCKET_NAME"),
-        google_cloud_project=value("GOOGLE_CLOUD_PROJECT"),
     )

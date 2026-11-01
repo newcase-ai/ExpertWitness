@@ -1,19 +1,37 @@
 """Ask a PDF (one question about a page range of one saved PDF) with the FakeAdkModel. Synthetic
-blank-page PDFs only: the fake model never reads them."""
+PDFs only: one line of text per page, "SYNTHETIC page N"."""
 
 import asyncio
 import io
 import json
 
-from pypdf import PdfReader, PdfWriter
+from pypdf import PdfWriter
 
 from app import store
 from app.tools import RESULT_MAX
-from app.tools.ask_pdf import ANSWER_MAX, NOT_FOUND
+from app.tools.ask_pdf import ANSWER_MAX, NO_TEXT, NOT_FOUND
 from tests.fakes import TEST_FILE_URL, run_tool, tool_ctx_fixture  # noqa: F401 - fixture
 
 
 def pdf_of(pages: int) -> bytes:
+    """A PDF whose page N has the text "SYNTHETIC page N" (pypdf writes no text, so it is built by hand)."""
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
+            f"<< /Type /Pages /Kids [{' '.join(f'{4 + 2 * i} 0 R' for i in range(pages))}] /Count {pages} >>".encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    for i in range(pages):
+        stream = f"BT /F1 12 Tf 72 720 Td (SYNTHETIC page {i + 1}) Tj ET"
+        objs += [f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >>"
+                 f" /Contents {5 + 2 * i} 0 R >>".encode(),
+                 f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream".encode()]
+    out, offsets = b"%PDF-1.4\n", []
+    for n, obj in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += f"{n} 0 obj\n".encode() + obj + b"\nendobj\n"
+    xref = f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n" + "".join(f"{o:010d} 00000 n \n" for o in offsets)
+    return out + f"{xref}trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{len(out)}\n%%EOF".encode()
+
+
+def blank_pdf(pages: int) -> bytes:
     writer = PdfWriter()
     for _ in range(pages):
         writer.add_blank_page(width=72, height=72)
@@ -43,11 +61,11 @@ def test_sends_only_the_asked_pages_with_question_and_context(tool_ctx, adk_mode
     adk_model.script = ["Testified in Doe v. Example Co. (page 22)."]
     reply = ask(tool_ctx, file_id=file_id, page_start=21, page_end=25, context="SYNTHETIC pages 1-20 had none")
     assert reply == {"answer": "Testified in Doe v. Example Co. (page 22).", "pages": "21-25", "page_count": 30}
-    text, attached = adk_model.seen[0].contents[-1].parts
-    assert "Question: Which cases?" in text.text and "SYNTHETIC pages 1-20 had none" in text.text
-    assert "pages 21-25 of a 30-page file" in text.text
-    assert attached.inline_data.mime_type == "application/pdf"
-    assert len(PdfReader(io.BytesIO(attached.inline_data.data)).pages) == 5
+    [part] = adk_model.seen[0].contents[-1].parts
+    assert "Question: Which cases?" in part.text and "SYNTHETIC pages 1-20 had none" in part.text
+    assert "Pages 21-25 of a 30-page file" in part.text
+    assert "[Page 21]\nSYNTHETIC page 21" in part.text and "[Page 25]\nSYNTHETIC page 25" in part.text
+    assert "page 20" not in part.text and "page 26" not in part.text
     assert rows(tool_ctx) == [("ask_pdf", "done", "pages 21-25 of 30")]
     assert tool_ctx.findings() == []  # nothing saved
 
@@ -65,6 +83,8 @@ def test_bad_calls_come_back_as_errors_the_agent_can_fix(tool_ctx, adk_model):
     broken = add_pdf(tool_ctx, data=b"SYNTHETIC not a pdf")
     assert ask(tool_ctx, file_id=broken, page_start=1, page_end=2) == {
         "error": "the PDF cannot be read (damaged or password protected)"}
+    scanned = add_pdf(tool_ctx, data=blank_pdf(3))
+    assert ask(tool_ctx, file_id=scanned, page_start=1, page_end=3) == {"error": NO_TEXT}
     assert adk_model.seen == []  # the model is never called for a bad call
     assert {status for _, status, _ in rows(tool_ctx)} == {"refused"}
 

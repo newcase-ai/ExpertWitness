@@ -12,7 +12,7 @@ See [SOURCES_AND_FLOW.md](SOURCES_AND_FLOW.md) for the pipeline, data sources an
 ## Run locally
 
 ```sh
-gcloud auth application-default login  # Gemini on Vertex AI; set GOOGLE_CLOUD_PROJECT in .env
+gcloud auth application-default login  # uploads of downloaded files to GCS_BUCKET_NAME
 uv sync
 uv run fastapi dev app/main.py
 ```

@@ -1,7 +1,7 @@
 """Download a file (DESIGN tool 7): download one PDF, save it (data/files/ and the GCS bucket) and
-describe it shortly with the model. The description is the file's note (memory.set_file_note) and a
-.txt next to the PDF in the bucket. A PDF too big for one model call is described from its first
-pages."""
+describe it shortly with the model from its text (pypdf). The description is the file's note
+(memory.set_file_note) and a .txt next to the PDF in the bucket. A PDF too big for one model call is
+described from its first pages."""
 
 import asyncio
 import io
@@ -17,7 +17,7 @@ from app import http, llm, memory
 from app.config import get_settings
 from app.evidence import refuse
 from app.tools import FILE_MAX, Ctx, tool
-from app.tools.ask_pdf import cut
+from app.tools.ask_pdf import pages_text
 
 MAX_REDIRECTS = 5
 DESCRIPTION_MAX = 1_500
@@ -26,7 +26,8 @@ GCS_UPLOAD = "https://storage.googleapis.com/upload/storage/v1/b/{bucket}/o"
 GCS_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
 UPLOAD_TIMEOUT = httpx.Timeout(120.0, connect=5.0)
 
-INSTRUCTIONS = """You describe one PDF for a researcher vetting an expert witness. In at most 5
+INSTRUCTIONS = """You describe one PDF for a researcher vetting an expert witness from its text (each
+page starts with a "[Page N]" line). In at most 5
 sentences and your own words: what kind of document it is (CV, deposition or trial transcript,
 court opinion, expert report, article, licence record...), who wrote it or appears in it, its date,
 and what it says about the expert's professional work (cases, roles, employers, licences). Say
@@ -71,17 +72,20 @@ async def upload(bucket: str, name: str, data: bytes, mime: str) -> str:
     return f"gs://{bucket}/{name}"
 
 
-async def describe(ctx: Ctx, path: str, data: bytes, count: int) -> tuple[str, str]:
-    """(description, described pages). The whole file first; over the token limit (HTTP 400), the
-    first FIRST_PAGES pages."""
+async def describe(ctx: Ctx, path: str, count: int) -> tuple[str | None, str | None]:
+    """(description, described pages): (None, None) when the described pages have no text (a scanned
+    PDF). The whole file first; over the token limit (HTTP 400), the first FIRST_PAGES pages."""
     tries = [count] + [n for n in FIRST_PAGES if n < count]
     for n, pages in enumerate(tries, 1):
+        text = (await asyncio.to_thread(pages_text, path, 1, pages))[0]
+        if not text:
+            return None, None
         whole = pages == count
-        prompt = (f"The expert: {ctx.expert.display_name}\n\nThe attached PDF is "
-                  + (f"the whole file ({count} pages)." if whole else f"pages 1-{pages} of a {count}-page file."))
+        prompt = (f"The expert: {ctx.expert.display_name}\n\n"
+                  + (f"The whole file ({count} pages):" if whole else f"Pages 1-{pages} of a {count}-page file:")
+                  + f"\n\n{text}")
         try:
-            pdf = data if whole else cut(path, 1, pages)[0]
-            answer = (await llm.call_model(INSTRUCTIONS, prompt, pdf=pdf)).text.strip()
+            answer = (await llm.call_model(INSTRUCTIONS, prompt)).text.strip()
             return answer[:DESCRIPTION_MAX], "all" if whole else f"1-{pages}"
         except llm.ModelError as e:
             if "HTTP 400" not in str(e) or n == len(tries):
@@ -109,8 +113,11 @@ async def download_file(ctx: Ctx, url: str) -> dict:
 
     description, described = None, None
     try:
-        description, described = await describe(ctx, path, data, count)
-        memory.set_file_note(file_id, description)
+        description, described = await describe(ctx, path, count)
+        if description:
+            memory.set_file_note(file_id, description)
+        else:
+            ctx.add_gap("file not described (no text in the PDF: scanned?)")
     except llm.ModelError as e:
         ctx.add_gap(f"file not described ({e})")
 

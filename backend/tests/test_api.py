@@ -78,6 +78,13 @@ def test_bad_input_is_422(client, body):
     assert client.post("/candidate-searches", json=body).status_code == 422
 
 
+def test_missing_model_key_is_503(client, monkeypatch):
+    monkeypatch.delenv("MODEL_API_KEY")
+    r = client.post("/candidate-searches", json={"name": "Alex Rivera"})
+    assert r.status_code == 503
+    assert r.json() == {"detail": "MODEL_API_KEY is not set"}
+
+
 def test_candidate_search_flow(client, monkeypatch):
     seen = {}
 

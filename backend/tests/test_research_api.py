@@ -187,11 +187,14 @@ def test_bad_body_is_422(client, body):
     assert client.post("/research", json=body).status_code == 422
 
 
-def test_errors(client):
+def test_errors(client, monkeypatch):
     r = client.post("/research", json={"candidate_id": "cand_nope"})
     assert r.status_code == 404 and r.json() == {"detail": "candidate not found"}
     r = client.get("/dossiers/dos_nope/findings")
     assert r.status_code == 404 and r.json() == {"detail": "dossier not found"}
+    monkeypatch.delenv("MODEL_API_KEY")
+    r = client.post("/research", json={"candidate_id": "cand_nope"})
+    assert r.status_code == 503 and r.json() == {"detail": "MODEL_API_KEY is not set"}
 
 
 def test_testimony_list_too_long_is_422(client, candidate_id):
