@@ -872,9 +872,13 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
 **Tool 2: sites for a state (engineer, T2).** File `app/tools/state_sites.py`.
 `sites_for_state(state: str)`, label "Sites for a state", cap 3.
 - Purpose: which public websites hold court, licence or discipline records for a US state.
-- Reads `memory.sites_in(state)`; if there are none, finds them with Meta web search
-  (`llm.call_model(web_search=True)`) plus `ctx.ask_model` to label each site (`what`,
-  `reliability`), and saves them (`memory.save_state_site`). Official `.gov` and court sites first.
+- Reads `memory.sites_in(state)` (only rows rated high; older lower-rated rows are hidden). If none,
+  runs three Meta web searches at once (`llm.call_model(web_search=True)`: courts, medical board,
+  licensing agency; 5 results each, official addresses first), then one `ctx.ask_model` call labels
+  each site (`what`, `reliability`, `useful`, `people_search`). Only sites rated high AND useful AND
+  not people-search are saved (`memory.save_state_site`). Official = `.gov` or a state `.us` name
+  (`state.tx.us`), not look-alikes like `arizonacourt.us`. Official sites first. First call per
+  state takes about 35-70 s; later calls come from memory.
 - Arguments: two-letter code or full state name (normalise with `app.sources.state_of`); anything
   else -> `refuse("unknown state")`.
 - Reply: `{"state", "sites": [{"domain", "what", "reliability", "blocked": reason|null}], "from_memory": bool}`.

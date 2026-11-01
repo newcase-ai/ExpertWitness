@@ -1,34 +1,48 @@
 """Tool 2: sites for a state (DESIGN 4B.9, memory 3). Which public websites hold court, licence or
-discipline records for one US state. Domains come only from web search results, never from model text;
-the model only labels them. Snippets and search notes stay in memory (gotcha 15)."""
+discipline records for one US state. Three web searches (courts, medical board, licensing agency);
+domains come only from their results, never from model text; the model only labels them, and only
+official, useful sites are kept. Snippets and search notes stay in memory (gotcha 15)."""
+
+import asyncio
+import re
 
 from app import llm, memory
 from app.evidence import refuse
 from app.sources import US_STATES, host_of, is_blocked, state_of
 from app.tools import Ctx, tool
 
-MAX_SITES = 10
+PER_SEARCH = 5  # results kept from each search, so one topic cannot crowd out the others
 SNIPPET_MAX = 300
 NOTES_MAX = 4_000
 STATE_NAMES = {code: name.title() for name, code in US_STATES.items()}
 UNKNOWN_STATE = "unknown state: give a two-letter code or a full US state name"
 NO_SITES = "no record sites found for {}"
-RANK = {"high": 0, "medium": 1, "low": 2, "unknown": 3}
+RELIABILITY = ["high", "medium", "low", "unknown"]
+QUERIES = [  # tuned on live runs for AZ, IL, NC and TX (2026-11-01)
+    "{} judicial branch official website: court case search and records",
+    "{} medical board official website: physician licence verification and discipline",
+    "{} state professional licensing department official website: licence lookup and disciplinary actions",
+]
 
 SEARCH_INSTRUCTIONS = (
     "You help a legal research tool find official public record websites. Run a web search for the "
-    "query given. Then, for each official site found, write one line: the URL and what records it "
-    "holds. Prefer state government (.gov) and court sites. Skip people-search, data-broker and paid "
-    "record sites, and LinkedIn, Google Scholar, Daubert Tracker, TrialSmith, CPAverify, BrokerCheck, "
-    "ABMS and DocInfo."
+    "query given. Then list each official site found, one line each: the URL and what records it holds. "
+    "List only official sites (state courts, county clerks of court, state agencies and licensing boards; "
+    "most use .gov, some boards use .org), never articles, guides, directories or record-search companies "
+    "that link to them. Skip people-search, data-broker and paid record sites, and LinkedIn, Google "
+    "Scholar, Daubert Tracker, TrialSmith, CPAverify, BrokerCheck, ABMS and DocInfo."
 )
 LABEL_INSTRUCTIONS = (
     "You read numbered web search results (S1, S2, ...) and search notes about public record websites "
-    "for one US state. For each result, say in your own words, in a few words, what records the site "
-    "holds (for example \"county trial court dockets\" or \"medical licence lookup\"), and how reliable "
-    "it is as a source of official records: high (the official court, agency or board site), medium "
-    "(another government or official site), low (unofficial) or unknown. Set people_search to true for "
-    "people-search, data-broker or paid record sites. Use only the results and notes given."
+    "for one US state. For each result say, in a few words of your own, what records the site holds "
+    "(for example \"county trial court dockets\" or \"physician licence lookup\"), and how reliable it "
+    "is: high (the official court, agency or board site itself), medium (another government or official "
+    "site), low (unofficial: directories, guides, articles, record vendors) or unknown. Set useful to "
+    "true if the site is where court cases or professional licences or discipline are looked up or held "
+    "(a court's or licensing agency's own home site counts). Each result says whether its address is an "
+    "official government address; a site that is not needs clear signs it is the court or board itself "
+    "(not a look-alike vendor) to be rated high. Set people_search to true for people-search, data-broker "
+    "or paid record sites. Use only the results and notes given."
 )
 LABEL_SCHEMA = {
     "type": "object",
@@ -37,11 +51,12 @@ LABEL_SCHEMA = {
     "properties": {"sites": {"type": "array", "items": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["ref", "what", "reliability", "people_search"],
+        "required": ["ref", "what", "reliability", "useful", "people_search"],
         "properties": {
             "ref": {"type": "string"},
             "what": {"type": "string"},
-            "reliability": {"type": "string", "enum": list(RANK)},
+            "reliability": {"type": "string", "enum": RELIABILITY},
+            "useful": {"type": "boolean"},
             "people_search": {"type": "boolean"},
         },
     }}},
@@ -55,48 +70,58 @@ def state_code(state: str) -> str | None:
 
 
 def is_official(domain: str) -> bool:
-    return domain.endswith((".gov", ".us"))
+    """A government address: .gov, or a state .us name like state.tx.us (not look-alikes such as
+    arizonacourt.us, which are record vendors)."""
+    return domain.endswith(".gov") or bool(re.search(r"\.[a-z]{2}\.us$", domain))
 
 
 def site_rows(state: str) -> list[dict]:
-    """Saved sites for `state`, official ones first, with their blocked reason (memory 4)."""
-    rows = sorted(memory.sites_in(state), key=lambda r: (not is_official(r["domain"]), RANK[r["reliability"]]))
+    """Saved sites for `state` rated high (older rows rated lower are hidden), official ones first,
+    with their blocked reason (memory 4)."""
+    rows = sorted((r for r in memory.sites_in(state) if r["reliability"] == "high"),
+                  key=lambda r: (not is_official(r["domain"]), r["domain"]))
     return [{"domain": r["domain"], "what": r["what"], "reliability": r["reliability"],
              "blocked": memory.blocked(r["domain"])} for r in rows]
 
 
-async def find_sites(ctx: Ctx, state: str) -> None:
-    """One web search, then one labelling call; saves the labelled domains."""
-    found = await llm.call_model(
-        SEARCH_INSTRUCTIONS,
-        f"Search query: {STATE_NAMES[state]} official court records search, professional licence lookup "
-        "and licensing board discipline",
-        web_search=True)
-    hits, seen = [], set()
+def domains(found: llm.ModelResult, seen: set[str]) -> list[tuple[str, dict]]:
+    """Up to PER_SEARCH new, allowed (domain, result) pairs from one search, official ones first."""
+    hits = []
     for item in found.results or found.citations:
         url = item.get("url") or ""
         domain = memory.domain_of(host_of(url) or "") if url.startswith(("http://", "https://")) else ""
-        if not domain or is_blocked(url) or domain in seen:
-            continue
-        seen.add(domain)
-        hits.append((domain, item))
-    hits = hits[:MAX_SITES]
+        if domain and not is_blocked(url) and domain not in seen:
+            seen.add(domain)
+            hits.append((domain, item))
+    return sorted(hits, key=lambda h: not is_official(h[0]))[:PER_SEARCH]
+
+
+async def find_sites(ctx: Ctx, state: str) -> None:
+    """Three web searches at once, then one labelling call; saves only official, useful sites."""
+    name = STATE_NAMES[state]
+    founds = await asyncio.gather(*[
+        llm.call_model(SEARCH_INSTRUCTIONS, f"Search query: {q.format(name)}", web_search=True) for q in QUERIES])
+    seen: set[str] = set()
+    hits = [hit for found in founds for hit in domains(found, seen)]
     if not hits:
         return
-    lines = [f"State: {STATE_NAMES[state]} ({state})", "Results:"]
-    lines += [f"S{i}. {d} | {(h.get('title') or '')[:200]} | excerpt: {(h.get('snippet') or '(none)')[:SNIPPET_MAX]}"
+    lines = [f"State: {name} ({state})", "Results:"]
+    lines += [f"S{i}. {d} ({'official' if is_official(d) else 'not official'} address) | "
+              f"{(h.get('title') or '')[:200]} | excerpt: {(h.get('snippet') or '(none)')[:SNIPPET_MAX]}"
               for i, (d, h) in enumerate(hits, 1)]
-    if found.text.strip():
-        lines += ["Search notes:", found.text.strip()[:NOTES_MAX]]
+    notes = "\n".join(f.text.strip() for f in founds if f.text.strip())
+    if notes:
+        lines += ["Search notes:", notes[:NOTES_MAX]]
     labels = await ctx.ask_model(LABEL_INSTRUCTIONS, "\n".join(lines), LABEL_SCHEMA)
     for label in labels.get("sites", []):
         ref = str(label.get("ref", "")).strip().upper().removeprefix("S")
-        # unknown refs, people-search sites and labels dropped by the copy-check are never saved
-        if not ref.isdigit() or not 1 <= int(ref) <= len(hits) or label.get("people_search") is not False:
+        # unknown refs, labels dropped by the copy-check and anything but official, useful,
+        # non-people-search sites are never saved
+        if not ref.isdigit() or not 1 <= int(ref) <= len(hits) or not label.get("what"):
             continue
-        if not label.get("what") or label.get("reliability") not in RANK:
+        if label.get("reliability") != "high" or label.get("useful") is not True or label.get("people_search") is not False:
             continue
-        memory.save_state_site(state, hits[int(ref) - 1][0], label["what"], label["reliability"])
+        memory.save_state_site(state, hits[int(ref) - 1][0], label["what"], "high")
 
 
 @tool(label="Sites for a state", cap=3)
@@ -108,10 +133,11 @@ async def sites_for_state(ctx: Ctx, state: str) -> dict:
     code = state_code(state)
     if not code:
         return refuse(UNKNOWN_STATE)
-    from_memory = bool(memory.sites_in(code))
+    sites = site_rows(code)
+    from_memory = bool(sites)
     if not from_memory:
         await find_sites(ctx, code)
-    sites = site_rows(code)
+        sites = site_rows(code)
     if not sites:
         ctx.add_gap(NO_SITES.format(code))
     ctx.log(f"{len(sites)} sites" + (" (from memory)" if from_memory else ""))

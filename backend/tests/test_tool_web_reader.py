@@ -18,6 +18,7 @@ from app.tools.web_reader import (
     INTERNAL,
     NO_TEXT,
     NOT_ALLOWED_TYPE,
+    PDF_TIMEOUT_MS,
     SECRET_URL,
     TOO_LARGE,
     TOO_MANY_REDIRECTS,
@@ -339,7 +340,14 @@ def test_firecrawl_failure_still_saves_the_file_with_a_gap(tool_ctx, sources, wi
     sources(routes=file_host() | {"api.firecrawl.dev": (500, {"success": False})})
     reply = download(tool_ctx)
     assert reply["has_text"] is False and tool_ctx.file_text(reply["file_id"]) == ""
-    assert gaps(tool_ctx) == [("download_file", NO_TEXT)]
+    assert gaps(tool_ctx) == [("download_file", f"{NO_TEXT}: Firecrawl HTTP 500")]
+
+
+def test_pdf_gets_the_longer_firecrawl_time_limit(tool_ctx, sources, with_key):
+    _, seen = sources(routes=file_host() | firecrawl())
+    download(tool_ctx)
+    body = json.loads(next(r for r in seen if r.url.host == "api.firecrawl.dev").content)
+    assert body["timeout"] == PDF_TIMEOUT_MS
 
 
 @pytest.mark.parametrize(("to", "refusal"), [
@@ -368,7 +376,7 @@ def test_download_redirects_are_checked(tool_ctx, sources, with_key, to, refusal
 def test_download_redirect_to_a_banned_firecrawl_url_saves_no_text(tool_ctx, sources, with_key):
     sources(routes=file_host() | firecrawl(url="https://www.courtlistener.com/opinion/1/x/"))
     assert download(tool_ctx)["has_text"] is False
-    assert gaps(tool_ctx) == [("download_file", NO_TEXT)]
+    assert gaps(tool_ctx) == [("download_file", f"{NO_TEXT}: Firecrawl ended on a refused address")]
 
 
 def test_redirect_to_a_host_resolving_internally_is_refused(tool_ctx, sources, with_key, monkeypatch):
