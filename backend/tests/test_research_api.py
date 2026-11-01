@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from app import jobs, store
 from app.main import app
-from app.models import Candidate
+from app.models import Candidate, Finding
 from app.tools import Ctx
 from tests.fakes import PAGE_MARKDOWN, PAGE_TEXT, call, register_tool_fixture  # noqa: F401 - fixture
 from tests.test_api import wait_for_job
@@ -130,7 +130,7 @@ def test_model_failure_before_any_tool_fails_job(client, candidate_id, adk_model
     assert job["error"] == "model call failed (RuntimeError)"
     assert job["steps"][0]["status"] == "failed" and "SECRET" not in json.dumps(job)
     r = client.get(f"/dossiers/{started['dossier_id']}/findings")
-    assert r.json() == {"detail": f"findings not ready: job {started['job_id']} is failed"}
+    assert r.status_code == 200 and r.json()["status"] == "failed" and r.json()["findings"] == []
 
 
 def test_model_failure_after_a_tool_keeps_findings(client, candidate_id, saving_tool, adk_model):
@@ -202,3 +202,40 @@ def test_testimony_list_too_long_is_422(client, candidate_id):
     assert r.status_code == 422
 
 
+
+
+def test_get_dossier_reads_a_saved_run(client, candidate_id):
+    """A page reload reads the run by its dossier id; nothing new is started."""
+    started = client.post("/research", json={"candidate_id": candidate_id}).json()
+    wait_for_job(client, started["job_id"])
+    jobs_before = store.execute("select count(*) as n from jobs")[0]["n"]
+    assert client.get(f"/dossiers/{started['dossier_id']}").json() == {
+        "dossier_id": started["dossier_id"], "candidate_id": candidate_id, "job_id": started["job_id"],
+        "status": "done", "display_name": "Alex J. Rivera"}
+    assert store.execute("select count(*) as n from jobs")[0]["n"] == jobs_before
+    assert client.get("/dossiers/dos_nope").status_code == 404
+
+
+def test_killed_run_still_shows_what_it_saved(client, candidate_id):
+    """Findings are saved as the agent finds them, so a run killed by a restart keeps them."""
+    job_id = store.create_job("research", jobs.RESEARCH_STEPS)
+    dossier_id = store.create_research(candidate_id, job_id)
+    store.start_job(job_id)
+    store.add_finding(dossier_id, Finding(collector="save_case", kind="web_testimony", title="Testimony in Doe",
+                                          url=CASE_URL, source_type="web", retrieved_at=store.now(), confidence="low"))
+    store.fail_interrupted_jobs()  # what startup does after a kill
+    body = client.get(f"/dossiers/{dossier_id}/findings").json()
+    assert body["status"] == "failed" and [f["title"] for f in body["findings"]] == ["Testimony in Doe"]
+
+
+def test_searches_list_shows_each_search_and_how_its_research_is_going(client, candidate_id, saving_tool,
+                                                                        adk_model):
+    adk_model.script = [call("save_case", case="Doe v. Example Co."), "DONE"]
+    started = client.post("/research", json={"candidate_id": candidate_id}).json()
+    wait_for_job(client, started["job_id"])
+    [search] = client.get("/candidate-searches").json()
+    run = search["research"][0]
+    assert (search["name"], search["candidates"]) == ("Alex Rivera", 1)
+    assert run["dossier_id"] == started["dossier_id"] and run["display_name"] == "Alex J. Rivera"
+    assert (run["status"], run["tool_calls"], run["findings"]) == ("done", 1, 1)
+    assert run["last_activity"] == "Save a case · done · 1 case saved"

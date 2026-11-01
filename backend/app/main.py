@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Response
@@ -8,11 +9,23 @@ from app.models import (
     CandidateSearch,
     CandidateSearchRequest,
     CandidateSearchStarted,
+    Dossier,
     Job,
     ResearchFindings,
     ResearchRequest,
     ResearchStarted,
+    SearchSummary,
 )
+
+# The server log: one line per job event and agent tool call (app/store.py), without the UI's status
+# checks every 2 s. uvicorn sets up only its own loggers.
+POLLED = ("/jobs/", "/candidate-searches/")
+agent_log = logging.getLogger("app.agent")
+agent_log.setLevel(logging.INFO)
+agent_log.addHandler(logging.StreamHandler())
+agent_log.handlers[-1].setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
+logging.getLogger("uvicorn.access").addFilter(
+    lambda r: not (len(r.args) > 2 and r.args[1] == "GET" and str(r.args[2]).startswith(POLLED)))
 
 
 @asynccontextmanager
@@ -38,6 +51,12 @@ async def start_candidate_search(body: CandidateSearchRequest) -> CandidateSearc
     hints = body.hints.model_dump() if body.hints else None
     search_id, job_id = jobs.start_candidate_search(body.name, hints)
     return CandidateSearchStarted(search_id=search_id, job_id=job_id, status="queued")
+
+
+@app.get("/candidate-searches")
+def list_candidate_searches() -> list[SearchSummary]:
+    """The newest 100 searches with their research runs: status, counts and the latest tool call."""
+    return store.list_searches()
 
 
 @app.get("/candidate-searches/{search_id}")
@@ -72,11 +91,21 @@ async def start_research(body: ResearchRequest, response: Response) -> ResearchS
     return ResearchStarted(job_id=job_id, dossier_id=dossier_id, status=status)
 
 
+@app.get("/dossiers/{dossier_id}")
+def get_dossier(dossier_id: str) -> Dossier:
+    research = store.get_research(dossier_id)
+    if research is None:
+        raise HTTPException(404, "dossier not found")
+    candidate = store.get_candidate(research.candidate_id)
+    return Dossier(dossier_id=dossier_id, candidate_id=research.candidate_id, job_id=research.job_id,
+                   status=research.status, display_name=candidate.display_name if candidate else "")
+
+
 @app.get("/dossiers/{dossier_id}/findings")
 def get_findings(dossier_id: str) -> ResearchFindings:
     research = store.get_research(dossier_id)
     if research is None:
         raise HTTPException(404, "dossier not found")
-    if research.status != "done":
+    if research.status in ("queued", "running"):  # a failed or killed run shows what it saved
         raise HTTPException(409, f"findings not ready: job {research.job_id} is {research.status}")
     return research

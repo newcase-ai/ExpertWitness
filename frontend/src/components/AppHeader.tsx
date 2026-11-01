@@ -17,6 +17,14 @@ export default function AppHeader() {
         >
           Search
         </NavLink>
+        <NavLink
+          to="/searches"
+          className={({ isActive }) =>
+            cn(isActive ? 'text-foreground' : 'text-muted-foreground hover:text-foreground')
+          }
+        >
+          Searches
+        </NavLink>
       </nav>
     </header>
   )

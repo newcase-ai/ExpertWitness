@@ -6,8 +6,9 @@ ENV_FILE = Path(".env")
 DEFAULT_MODEL = "muse-spark-1.3"
 DEFAULT_DATABASE_PATH = "data/expert_witness.db"
 # Main agent (DESIGN 4B.5, 4B.11 D7): starting values, tuned in the live runs.
-RESEARCH_SECONDS = 600  # the research job's time budget (decision 8: 10 minutes)
-MAX_AGENT_CALLS = 40  # model calls of the main agent (ADK max_llm_calls)
+RESEARCH_SECONDS = 4 * 60 * 60  # the research job's time budget: 4 hours
+MAX_AGENT_CALLS = 1_000  # model calls of the main agent (ADK max_llm_calls)
+TOOL_CAP_SCALE = 10  # a research run may call each tool this many times its card's cap
 
 
 @dataclass(frozen=True)

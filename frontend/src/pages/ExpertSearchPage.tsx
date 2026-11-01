@@ -1,5 +1,6 @@
-// Search → pick the right person → research (ExpertProfilePage). The query lives in the URL so
-// Back from research returns to the same results.
+// Search → pick the right person → research (/research/:dossierId). Only the buttons start work: the
+// query and the saved search's id live in the URL, so Back or a reload shows the same results
+// without searching again.
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { LoaderCircle } from 'lucide-react'
@@ -7,7 +8,7 @@ import AppHeader from '@/components/AppHeader'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
-import { searchExperts, ExpertCandidate, SearchQuery } from '@/lib/api'
+import { ExpertCandidate, loadSearch, SearchQuery, startResearch, startSearch } from '@/lib/api'
 
 type Results = { key: string; people: ExpertCandidate[] } | { key: string; error: string }
 
@@ -18,36 +19,41 @@ export default function ExpertSearchPage() {
     specialty: params.get('specialty') ?? '',
     location: params.get('location') ?? '',
   }
+  const searchId = params.get('search')
   const key = params.toString()
   const [results, setResults] = useState<Results | null>(null)
 
   useEffect(() => {
-    if (!query.name) return setResults(null)
+    if (!searchId) return
     let live = true
-    searchExperts(query)
-      .then((people) => live && setResults({ key, people }))
+    loadSearch(searchId)
+      .then((people) => live && setResults({ key: searchId, people }))
       .catch(
-        (e) => live && setResults({ key, error: e instanceof Error ? e.message : 'Search failed' })
+        (e) =>
+          live &&
+          setResults({ key: searchId, error: e instanceof Error ? e.message : 'Search failed' })
       )
     return () => {
       live = false
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key])
+  }, [searchId])
 
-  const search = (q: SearchQuery) =>
-    setParams(
-      Object.fromEntries(
-        Object.entries(q)
-          .filter(([, v]) => v.trim())
-          .map(([k, v]) => [k, v.trim()])
+  const search = (q: SearchQuery) => {
+    const trimmed = { name: q.name.trim(), specialty: q.specialty.trim(), location: q.location.trim() }
+    setResults(null)
+    startSearch(trimmed)
+      .then((id) =>
+        setParams({ ...Object.fromEntries(Object.entries(trimmed).filter(([, v]) => v)), search: id })
       )
-    )
+      .catch((e) =>
+        setResults({ key: '', error: e instanceof Error ? e.message : 'Search failed to start' })
+      )
+  }
 
   return (
     <div className="min-h-screen text-sm">
       <AppHeader />
-      {!query.name ? (
+      {!searchId ? (
         <main className="mx-auto flex max-w-[640px] flex-col gap-6 px-4 pb-12 pt-24">
           <div className="space-y-1.5">
             <h1 className="font-serif text-[28px] font-semibold tracking-tight">
@@ -58,11 +64,16 @@ export default function ExpertSearchPage() {
             </p>
           </div>
           <SearchForm initial={query} onSearch={search} />
+          {results?.key === '' && 'error' in results && (
+            <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
+              {results.error}
+            </p>
+          )}
         </main>
       ) : (
         <main className="mx-auto flex max-w-[800px] flex-col gap-5 px-4 pb-12 pt-8">
           <SearchForm key={key} initial={query} onSearch={search} compact />
-          {results?.key !== key ? (
+          {results?.key !== searchId ? (
             <p role="status" className="flex items-center gap-2 text-muted-foreground">
               <LoaderCircle className="size-4 animate-spin text-primary" /> Searching for{' '}
               {query.name}…
@@ -189,6 +200,16 @@ function Field({
 
 function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCandidate[] }) {
   const navigate = useNavigate()
+  const [starting, setStarting] = useState(false)
+  const research = (candidateId: string) => {
+    setStarting(true)
+    startResearch(candidateId)
+      .then((dossierId) => navigate(`/research/${dossierId}`))
+      .catch((e) => {
+        setStarting(false)
+        alert(e instanceof Error ? e.message : 'Research failed to start')
+      })
+  }
   return (
     <>
       <div className="space-y-1">
@@ -245,7 +266,8 @@ function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCa
             <Button
               variant={p.match === 'strong' ? 'default' : 'outline'}
               className={cn(p.match !== 'strong' && 'border-primary text-primary')}
-              onClick={() => navigate(`/experts/${p.id}`)}
+              disabled={starting}
+              onClick={() => research(p.id)}
             >
               Research this expert
             </Button>

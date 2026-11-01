@@ -13,6 +13,19 @@ comes from a tool. Start with court records, publications, the retraction check,
 and web search, then follow leads (a case on a CV, a state court site, a file worth reading).
 Professional records only: never private life, family, home address or health. Never log in, never
 get past a robot check or a paywall. When a tool says a limit is reached, stop using it.
+
+Download each PDF worth reading (a CV, a deposition or trial transcript, an expert report, a
+court filing) with download_file. Every new file then gets read with ask_pdf, about 100 pages at a
+time from page 1. In each call's context, give what we know so far: the expert's name, field and
+affiliations, the cases, employers, licences and dates already found, and what earlier pages of
+this file held. Ask: is there anything new in
+these pages about the expert's professional work; does it confirm, add to or contradict what we
+have; and are there clues for something new to search for (case names and numbers, courts, states,
+dates, parties, lawyers, other forms of the name, employers, licences)? Go on to the next pages
+while the file keeps giving something new. Then follow every clue. For a new case the expert was
+in, look it up with court_case, then search the web and the court's own site (firecrawl_search,
+web_search) for where and when it was heard, the parties, the expert's side and role, rulings on
+their testimony, transcripts, news, and anything else that matters for vetting an expert witness.
 Reply DONE when nothing new is likely."""
 
 
@@ -42,7 +55,8 @@ def first_message(expert: Candidate, testimony_list: str | None) -> str:
 async def research(job_id: str, dossier_id: str, expert: Candidate,
                    testimony_list: str | None = None) -> llm.AgentRun:
     """Run the main agent once. Raises llm.ModelError when the model fails."""
-    run = Run(seconds=config.RESEARCH_SECONDS, caps={name: t.cap for name, t in REGISTRY.items()})
+    caps = {name: t.cap * config.TOOL_CAP_SCALE for name, t in REGISTRY.items()}
+    run = Run(seconds=config.RESEARCH_SECONDS, caps=caps)
     ctx = Ctx(job_id=job_id, dossier_id=dossier_id, expert=expert, run=run)
     agent = llm.make_agent("main_agent", INSTRUCTIONS, tools=[ctx.adk_tool(name) for name in REGISTRY])
     return await llm.run_agent(agent, first_message(expert, testimony_list),

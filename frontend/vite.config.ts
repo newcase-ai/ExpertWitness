@@ -10,5 +10,7 @@ export default defineConfig({
     },
   },
   // The FastAPI backend (backend/) runs on :8000 in dev.
-  server: { proxy: { '/api': 'http://localhost:8000' } },
+  server: {
+    proxy: { '/api': { target: 'http://localhost:8000', rewrite: (p) => p.replace(/^\/api/, '') } },
+  },
 })
