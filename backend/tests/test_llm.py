@@ -1,32 +1,28 @@
-"""The ADK layer and call_model (DESIGN 4A.2, 4A.7). Never the real API: web search uses an httpx
-MockTransport, ADK agents the FakeAdkModel from conftest, LiteLLM its offline `mock_response`."""
+"""The ADK layer and call_model (DESIGN 4A.2, 4A.7). Never the real API: web search uses a fake
+google-genai Client (redirects an httpx MockTransport), ADK agents the FakeAdkModel from conftest."""
 
 import asyncio
-import json
 
 import httpx
 import pytest
-from google.adk.models.lite_llm import LiteLlm, LiteLLMClient
+from google.adk.models.google_llm import Gemini
 from google.adk.tools import FunctionTool
+from google.genai import errors, types
 from pydantic import BaseModel
 
 from app import evidence, llm
-from tests.fakes import HANG, WEB_RESULTS, call
+from tests.fakes import HANG, call
 
-# Web search: plain httpx Responses call (MockTransport)
+# Web search: google-genai call with Google Search grounding (fake Client)
 
-
-def sse(*events):
-    return "".join(f"data: {json.dumps(e)}\n\n" for e in events) + "data: [DONE]\n\n"
+REDIRECT = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/"
 
 
-def completed(output):
-    return {"type": "response.completed", "response": {"status": "completed", "output": output}}
-
-
-def message(text, annotations=()):
-    return {"type": "message", "role": "assistant",
-            "content": [{"type": "output_text", "text": text, "annotations": list(annotations)}]}
+def grounded(text, *pages):
+    chunks = [types.GroundingChunk(web=types.GroundingChunkWeb(uri=uri, title=title)) for uri, title in pages]
+    return types.GenerateContentResponse(candidates=[types.Candidate(
+        content=types.Content(role="model", parts=[types.Part(text=text)]),
+        grounding_metadata=types.GroundingMetadata(grounding_chunks=chunks))])
 
 
 def search(query="q"):
@@ -34,106 +30,75 @@ def search(query="q"):
 
 
 @pytest.fixture
-def meta(monkeypatch):
-    """Queue of (status, body) replies for the Meta endpoint; returns (queue, seen requests)."""
-    queue, seen = [], []
+def gemini(monkeypatch):
+    """Fake google-genai Client: `replies` (a response or an Exception per call), `seen` (Client
+    kwargs, then generate_content kwargs). Redirects: Location = the path after REDIRECT."""
+    replies, seen = [], []
 
-    def handle(request):
-        seen.append(request)
-        status, body = queue.pop(0)
-        return httpx.Response(status, text=body, headers={"content-type": "text/event-stream"})
+    class Aio:
+        async def __aenter__(self):
+            return self
 
-    monkeypatch.setattr(llm, "transport", httpx.MockTransport(handle))
-    monkeypatch.setattr(llm, "BACKOFF", (0, 0))
-    return queue, seen
+        async def __aexit__(self, *exc):
+            return False
+
+        class models:  # mirrors client.aio.models
+            @staticmethod
+            async def generate_content(**kwargs):
+                seen.append(kwargs)
+                reply = replies.pop(0)
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+            self.aio = Aio()
+
+    def redirect(request):
+        target = str(request.url).removeprefix(REDIRECT)
+        return httpx.Response(302, headers={"location": target}) if target != "broken" else httpx.Response(404)
+
+    monkeypatch.setattr(llm, "Client", FakeClient)
+    monkeypatch.setattr(llm, "transport", httpx.MockTransport(redirect))
+    return replies, seen
 
 
-def test_web_search_parses_results_and_citations(meta):
-    queue, seen = meta
-    found = {"type": "web_search_call", "id": "ws_1", "status": "completed", "results": WEB_RESULTS[:1]}
-    cite = {"type": "url_citation", "url": "https://example.edu/faculty/rivera", "title": "Faculty page",
-            "start_index": 0, "end_index": 4}
-    queue.append((200, sse({"type": "response.created"}, completed([found, message("Done.", [cite])]))))
+def test_web_search_resolves_google_redirects(gemini, monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
+    replies, seen = gemini
+    replies.append(grounded("Done.", (REDIRECT + "https://example.edu/faculty/rivera", "example.edu"),
+                            ("https://example.org/direct", "example.org"), (REDIRECT + "broken", "gone.test")))
     out = search()
     assert out.text == "Done."
-    assert out.results[0]["url"] == "https://example.edu/faculty/rivera"
-    assert out.citations[0]["title"] == "Faculty page"
-    body = json.loads(seen[0].content)
-    assert body["tools"] == [{"type": "web_search"}]
-    assert body["include"] == ["web_search_call.results"]
-    assert body["store"] is False and body["stream"] is True and body["model"] == "muse-spark-1.3"
-    assert seen[0].headers["Authorization"] == "Bearer test-key"
-    assert str(seen[0].url) == "https://api.meta.ai/v1/responses"
+    assert out.results == [{"url": "https://example.edu/faculty/rivera", "title": "example.edu"},
+                           {"url": "https://example.org/direct", "title": "example.org"}]
+    client_kwargs, request = seen
+    assert client_kwargs["vertexai"] is True and client_kwargs["project"] == "test-project"
+    assert request["model"] == "gemini-3.8-flash" and request["contents"] == "q"
+    assert request["config"].system_instruction == "i"
+    assert request["config"].tools[0].google_search is not None
 
 
-def test_web_search_errors_never_quote_the_provider(meta):
-    queue, _ = meta
-    for kind in ("response.failed", "error"):
-        bad = {"code": "SYNTHETIC 12 Elm St copied reply", "message": "SYNTHETIC 12 Elm St"}
-        queue.append((200, sse({"type": kind, "response": {"error": bad}, "error": bad})))
-        with pytest.raises(llm.ModelError, match=f"ended with {kind}") as err:
-            search()
-        assert "Elm" not in str(err.value)
+def test_web_search_without_grounding_is_empty(gemini):
+    replies, _ = gemini
+    replies += [types.GenerateContentResponse(candidates=[]), grounded("no pages")]
+    assert search().results == []
+    assert search().text == "no pages"
 
 
-@pytest.mark.parametrize("stream", [
-    "data: {not json\n\n",  # malformed line
-    'data: {"type": "response.completed", "response": "x\n\n',  # unterminated string
-    sse({"type": "response.completed"}),  # no response object
-    sse({"type": "response.completed", "response": None}),
-    sse({"type": "response.completed", "response": {"output": ["not a dict"]}}),
-    sse({"type": "response.completed", "response": {"output": 5}}),
-    "data: [1, 2]\n\n",
-    "",  # stream ends without response.completed
-])
-def test_web_search_every_bad_stream_is_a_model_error(meta, stream):
-    queue, _ = meta
-    queue.append((200, stream))
-    with pytest.raises(llm.ModelError):
+def test_web_search_errors_never_quote_the_provider(gemini):
+    replies, _ = gemini
+    replies.append(errors.ClientError(429, {"error": {"message": "SYNTHETIC 12 Elm St"}}))
+    with pytest.raises(llm.ModelError) as err:
         search()
+    assert str(err.value) == "model call failed (ClientError, HTTP 429)"
 
 
-def test_web_search_unreachable_is_a_model_error(monkeypatch):
-    def down(request):
-        raise httpx.ConnectError("SYNTHETIC provider text")
-
-    monkeypatch.setattr(llm, "transport", httpx.MockTransport(down))
-    monkeypatch.setattr(llm, "BACKOFF", (0, 0))
-    with pytest.raises(llm.ModelError, match=r"unreachable \(ConnectError\)") as err:
-        search()
-    assert "SYNTHETIC" not in str(err.value)
-
-
-def test_web_search_retries_5xx_but_not_400(meta):
-    queue, seen = meta
-    queue += [(503, ""), (429, ""), (200, sse(completed([message("ok")])))]
-    assert search().text == "ok"
-    assert len(seen) == 3
-    queue.append((400, '{"error": "bad"}'))
-    with pytest.raises(llm.ModelError, match="400"):
-        search()
-    assert len(seen) == 4
-
-
-def test_refuses_missing_key_contributor_and_search_plus_schema(monkeypatch):
-    for name in ("muse-spark-1.3-contributor", "MUSE-SPARK-1.3-CONTRIBUTOR", "muse-spark-contributor-1.3 "):
-        with pytest.raises(llm.ModelError, match="contributor"):
-            llm.check_model_name(name)
+def test_refuses_search_plus_schema():
     with pytest.raises(ValueError, match="two calls"):
         asyncio.run(llm.call_model("i", "q", schema={"type": "object"}, web_search=True))
-    monkeypatch.delenv("MODEL_API_KEY")
-    with pytest.raises(llm.ModelError, match="MODEL_API_KEY is not set"):
-        asyncio.run(llm.call_model("i", "q"))
-    with pytest.raises(llm.ModelError, match="MODEL_API_KEY is not set"):
-        llm.make_model()
-
-
-def test_make_model_refuses_a_contributor_name_even_in_tests(monkeypatch):
-    # get_settings already refuses MODEL_NAME; make_model checks again before the fake hook.
-    monkeypatch.setattr(llm, "get_settings", lambda: type("S", (), {
-        "model_name": "muse-spark-1.3-contributor", "model_api_key": "k"})())
-    with pytest.raises(llm.ModelError, match="contributor"):
-        llm.make_model()
 
 
 # call_model without web search: a one-shot ADK agent
@@ -168,61 +133,20 @@ def test_call_model_bad_output_twice_never_quotes_the_model(adk_model):
     assert asyncio.run(llm.call_model("i", "q", schema={"type": "object"}, output_type=Shape)).data == Shape(name="x")
 
 
-@pytest.fixture
-def litellm_offline(monkeypatch):
-    """The real LiteLlm model, answered by LiteLLM's offline `mock_response`. Returns (replies, sent)."""
-    monkeypatch.setattr(llm, "fake_model", None)
-    replies, sent = [], []
-    original = LiteLLMClient.acompletion
-
-    async def acompletion(self, model, messages, tools, **kwargs):
-        sent.append({"model": model, "messages": messages, "tools": tools, **kwargs})
-        return await original(self, model, messages, tools, mock_response=replies.pop(0), **kwargs)
-
-    monkeypatch.setattr(LiteLLMClient, "acompletion", acompletion)
-    return replies, sent
-
-
-def test_schema_is_sent_as_response_format_on_the_chat_route(litellm_offline):
-    replies, sent = litellm_offline
-    replies.append('{"a": 1}')
+def test_schema_is_sent_as_a_json_schema(adk_model):
+    adk_model.script = ['{"a": 1}']
     schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
     assert asyncio.run(llm.call_model("i", "q", schema=schema)).data == {"a": 1}
-    assert sent[0]["response_format"] == {"type": "json_schema",
-                                          "json_schema": {"name": "result", "schema": schema, "strict": True}}
-    assert "text" not in sent[0]
-    assert sent[0]["model"] == "openai/muse-spark-1.3" and sent[0]["api_base"] == "https://api.meta.ai/v1"
-    assert sent[0]["max_retries"] == llm.MODEL_RETRIES
+    config = adk_model.seen[0].config
+    assert config.response_mime_type == "application/json" and config.response_json_schema == schema
 
 
-@pytest.mark.parametrize("error, status", [("litellm.RateLimitError", "429"),
-                                           ("litellm.InternalServerError", "500")])
-def test_litellm_errors_become_fixed_text(litellm_offline, error, status):
-    replies, _ = litellm_offline
-    replies.append(error)
-    with pytest.raises(llm.ModelError) as err:
-        asyncio.run(llm.call_model("i", "q"))
-    assert str(err.value) == f"model call failed ({error.split('.')[1]}, HTTP {status})"
-
-
-def test_tool_calls_skip_the_litellm_mcp_handler(litellm_offline):
-    # Without the flag litellm imports its MCP gateway for any call with tools and fails (no `mcp`).
-    replies, sent = litellm_offline
-    replies.append("DONE")
-
-    async def lookup(case_id: str) -> dict:
-        """Look up a case by id."""
-        return {}
-
-    agent = llm.make_agent("t", "x", tools=[FunctionTool(lookup)])
-    out = asyncio.run(llm.run_agent(agent, "go", max_llm_calls=2, timeout=5))
-    assert out.text == "DONE" and sent[0]["tools"] and sent[0]["_skip_mcp_handler"] is True
-
-
-def test_make_model_builds_the_chat_route(monkeypatch):
+def test_make_model_builds_gemini_on_vertex(monkeypatch):
     monkeypatch.setattr(llm, "fake_model", None)
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "test-project")
     model = llm.make_model()
-    assert isinstance(model, LiteLlm) and model.model == "openai/muse-spark-1.3"
+    assert isinstance(model, Gemini) and model.model == "gemini-3.8-flash"
+    assert model.client_kwargs == {"vertexai": True, "project": "test-project", "location": "global"} and model.retry_options == llm.RETRY
 
 
 # run_agent: tool loop, step and time limits, errors

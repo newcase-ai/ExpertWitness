@@ -194,6 +194,41 @@ class ResearchStarted(BaseModel):
     status: JobStatus
 
 
+class ResearchSummary(BaseModel):
+    """One research run in the searches list: how it is going."""
+
+    dossier_id: str
+    display_name: str
+    status: JobStatus
+    error: str | None = None
+    created_at: str
+    finished_at: str | None = None
+    tool_calls: int
+    findings: int
+    last_activity: str | None = None  # the latest tool call: label, status and detail
+
+
+class SearchSummary(BaseModel):
+    """One candidate search in the searches list, with the research runs started from it."""
+
+    search_id: str
+    name: str
+    created_at: str
+    status: JobStatus
+    candidates: int
+    research: list[ResearchSummary] = []
+
+
+class Dossier(BaseModel):
+    """One research run, so a page can follow it again after a reload."""
+
+    dossier_id: str
+    candidate_id: str
+    job_id: str
+    status: JobStatus
+    display_name: str
+
+
 class Finding(BaseModel):
     finding_id: str = ""  # assigned by app/store.py when saved
     # Open strings (DESIGN 4B.11 D2): `collector` is the tool name, `kind` is listed on each tool card.
