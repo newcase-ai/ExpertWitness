@@ -15,10 +15,10 @@ Professional records only: never private life, family, home address or health. N
 get past a robot check or a paywall. When a tool says a limit is reached, stop using it.
 
 Download each PDF worth reading (a CV, a deposition or trial transcript, an expert report, a
-court filing) with download_file: it replies with a short description of the file. Every new
-file then gets read with ask_pdf, about 100 pages at a time from page 1. In each call's context,
-give what we know so far: the expert's name, field and affiliations, the cases, employers, licences
-and dates already found, and what earlier pages of this file held. Ask: is there anything new in
+court filing) with download_file. Every new file then gets read with ask_pdf, about 100 pages at a
+time from page 1. In each call's context, give what we know so far: the expert's name, field and
+affiliations, the cases, employers, licences and dates already found, and what earlier pages of
+this file held. Ask: is there anything new in
 these pages about the expert's professional work; does it confirm, add to or contradict what we
 have; and are there clues for something new to search for (case names and numbers, courts, states,
 dates, parties, lawyers, other forms of the name, employers, licences)? Go on to the next pages

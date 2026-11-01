@@ -19,7 +19,6 @@ class Settings:
     contact_email: str | None
     database_path: str
     firecrawl_api_key: str | None = None
-    gcs_bucket: str | None = None  # downloaded files and their descriptions go here
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -57,5 +56,4 @@ def get_settings() -> Settings:
         contact_email=value("CONTACT_EMAIL"),
         database_path=value("DATABASE_PATH") or DEFAULT_DATABASE_PATH,
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
-        gcs_bucket=value("GCS_BUCKET_NAME"),
     )
