@@ -36,7 +36,8 @@ def bullets(items: list) -> list[str]:
 
 def note_md(row: dict, answer: dict) -> str:
     """The note: code-made header (source URL, retrieved date), then the model's items."""
-    lines = [f"# File note: {row['file_id']}", f"Source: {row['source_url']}",
+    # no file_id in the text: a random id with 12+ digits in a row trips the secret check (gotcha 45)
+    lines = ["# File note", f"Source: {row['source_url']}",
              f"Retrieved: {row['retrieved_at'][:10]}", "",
              f"What it is: {' '.join(str(answer.get('what_it_is') or 'not stated').split())}", "",
              "## Professional work", *bullets(answer.get("professional_work") or []), "",
