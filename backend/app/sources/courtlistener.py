@@ -1,17 +1,24 @@
-"""CourtListener opinion search (DESIGN 4.1) and opinion passages (DESIGN 4.2); gotchas 5, 11, 13."""
+"""CourtListener: opinion search (DESIGN 4.1, the candidate search) and opinion passages (DESIGN 4.2);
+RECAP docket search (the research tools: PACER dockets and filings, user decision 2026-11-01);
+gotchas 5, 11, 13."""
 
 import html
+import logging
 import re
 import time
 from collections.abc import Callable
+
+import httpx
 
 from app import http, store
 from app.config import get_settings
 from app.sources import (
     TITLES,
+    SourceFailed,
     SourceSkipped,
     fold,
     given_family,
+    has_full_name,
     name_tokens,
     name_words,
     strip_accents,
@@ -21,6 +28,24 @@ SITE = "https://www.courtlistener.com"
 SEARCH = f"{SITE}/api/rest/v4/search/"
 MAX_HITS = 20
 CAPS = ((3600, 50, "hourly"), (86400, 125, "daily"))  # gotcha 5; per-minute spacing is in app/http.py
+# The RECAP search is sometimes slow on a query it has not run lately (2026-11-01: 20 s timed out,
+# the same query took 2 s a minute later): a longer wait, and one retry after a timeout or a 502-504.
+TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+RETRY_STATUS = {502, 503, 504}
+TIMED_OUT = (f"CourtListener did not answer within {TIMEOUT.read:g} s (tried twice). It is sometimes slow: "
+             "call the tool again in a minute")
+log = logging.getLogger("app.agent")  # shown in the server log (app/main.py)
+
+
+def failure(status: int) -> str:
+    """What an HTTP error from CourtListener means for the caller, in fixed words."""
+    if status == 429:
+        return "CourtListener HTTP 429: rate limited. Wait a few minutes before calling again"
+    if status in (401, 403):
+        return f"CourtListener HTTP {status}: the API token was refused. Calling again will not help"
+    if status >= 500:
+        return f"CourtListener HTTP {status}: server error (tried twice if it was 502-504). Try again in a few minutes"
+    return f"CourtListener HTTP {status}: the request was refused. Calling again with the same input will not help"
 
 
 def name_variants(name: str) -> list[str]:
@@ -117,39 +142,45 @@ def token() -> str:
 
 async def get_json(url: str, params: dict | None, valid: Callable[[object], bool], token: str) -> dict:
     """One CourtListener read with the hour/day caps, call counting and cache rules (gotcha 5).
-    Only a body that passes `valid` is cached or returned."""
-    for seconds, cap, label in CAPS:
-        if store.calls_since("courtlistener", seconds) >= cap:
-            raise SourceSkipped(f"CourtListener {label} limit of {cap} calls reached")
-    # Earliest moment the request can go out. If other callers queue ahead it goes out later, so a
-    # timeout in that gap is still counted: the safe side for the hour/day caps.
-    limiter = http.limiters.get("courtlistener")
-    send_at = max(time.monotonic(), limiter.last + limiter.interval) if limiter else time.monotonic()
-    try:
-        r = await http.fetch(
-            "courtlistener",
-            url,
-            params=params,
-            headers={"Authorization": f"Token {token}"},
-            cache=True,
-            cache_if=valid,
-        )
-    except BaseException:
-        # Failed or timed out after the rate-limit wait: the request went out, so it counts (gotcha 5).
-        if time.monotonic() >= send_at:
+    Only a body that passes `valid` is cached or returned. A timeout or a 502-504 is retried once;
+    failures raise SourceFailed saying what happened and whether calling again can help."""
+    for attempt in (1, 2):
+        for seconds, cap, label in CAPS:  # each attempt is a call
+            if store.calls_since("courtlistener", seconds) >= cap:
+                raise SourceSkipped(f"CourtListener {label} limit of {cap} calls reached")
+        # Earliest moment the request can go out. If other callers queue ahead it goes out later, so a
+        # timeout in that gap is still counted: the safe side for the hour/day caps.
+        limiter = http.limiters.get("courtlistener")
+        send_at = max(time.monotonic(), limiter.last + limiter.interval) if limiter else time.monotonic()
+        try:
+            r = await http.fetch("courtlistener", url, params=params, headers={"Authorization": f"Token {token}"},
+                                 cache=True, cache_if=valid, timeout=TIMEOUT)
+        except BaseException as e:
+            # Failed or timed out after the rate-limit wait: the request went out, so it counts (gotcha 5).
+            if time.monotonic() >= send_at:
+                store.record_call("courtlistener")
+            if not isinstance(e, httpx.TimeoutException):
+                raise
+            if attempt == 2:
+                raise SourceFailed(TIMED_OUT) from None
+            log.warning("CourtListener did not answer within %g s (%s); retrying once", TIMEOUT.read,
+                        type(e).__name__)
+            continue
+        if not r.from_cache:  # cache hits cost nothing
             store.record_call("courtlistener")
-        raise
-    if not r.from_cache:  # cache hits cost nothing
-        store.record_call("courtlistener")
-    if r.status_code != 200:
-        raise RuntimeError(f"CourtListener HTTP {r.status_code}")
-    try:
-        body = r.json()
-    except ValueError:
-        body = None
-    if not valid(body):
-        raise RuntimeError("CourtListener returned an unexpected response")
-    return body
+        if r.status_code in RETRY_STATUS and attempt == 1:
+            log.warning("CourtListener HTTP %s; retrying once", r.status_code)
+            continue
+        if r.status_code != 200:
+            raise SourceFailed(failure(r.status_code))
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        if not valid(body):
+            raise SourceFailed("CourtListener returned an unexpected response. Try again later")
+        return body
+    raise AssertionError("unreachable")
 
 
 async def search_opinions(name: str) -> list[dict]:
@@ -158,6 +189,59 @@ async def search_opinions(name: str) -> list[dict]:
         raise SourceSkipped("need a given and a family name; surname-only search is not used")
     body = await get_json(SEARCH, {"type": "o", "q": build_query(name), "highlight": "on"}, is_search_body, key)
     return [to_hit(x) for x in body["results"][:MAX_HITS]]
+
+
+# RECAP (PACER) dockets: federal cases whose filings (or parties, lawyers) name the person. Filings
+# say "reviewed by Dr. Alex Rivera" or "consulting physician", so only the full name is required;
+# the AI same-person check in app/tools/courtlistener.py decides the rest.
+DOCS_PER_CASE = 3
+
+
+def is_docket_body(body: object) -> bool:
+    """A well-formed RECAP search answer: {"results": [{"docket_absolute_url": "/..."}]}."""
+    results = body.get("results") if isinstance(body, dict) else None
+    return isinstance(results, list) and all(
+        isinstance(x, dict) and isinstance(x.get("docket_absolute_url"), str)
+        and x["docket_absolute_url"].startswith("/") for x in results
+    )
+
+
+def to_docket(result: dict, name: str) -> dict:
+    """One RECAP search result: the case (fields copied by code), the filings that matched (description
+    and link) and `passages`, their highlighted search snippets: in memory only, never stored (gotcha 15)."""
+    docs = [d for d in result.get("recap_documents") or [] if isinstance(d, dict)][:DOCS_PER_CASE]
+    named_as = [role for role in ("party", "attorney")
+                if has_full_name(" ".join(text(x) for x in result.get(role) or []), name)]
+    return {
+        "url": SITE + result["docket_absolute_url"],
+        "case_name": clean(result.get("caseName")) or "Court case",
+        "court": clean(result.get("court")),
+        "docket_number": clean(result.get("docketNumber")),
+        "date_filed": clean(result.get("dateFiled")),
+        "nature_of_suit": clean(result.get("suitNature")),
+        "named_as": named_as,
+        "documents": [{"description": clean(d.get("short_description") or d.get("description"))[:200],
+                       "date_filed": clean(d.get("entry_date_filed")),
+                       "url": SITE + d["absolute_url"] if text(d.get("absolute_url")).startswith("/") else None}
+                      for d in docs],
+        "passages": [clean(d.get("snippet"))[:PASSAGE_CHARS] for d in docs if "<mark>" in text(d.get("snippet"))],
+    }
+
+
+def name_query(name: str) -> str:
+    """The full-name phrases (with and without middle name and accents), OR-ed; never the surname alone."""
+    variants = name_variants(name)
+    variants += [p for p in (strip_accents(v) for v in variants) if p not in variants]
+    return " OR ".join(f'"{v}"' for v in variants)
+
+
+async def search_dockets(name: str) -> list[dict]:
+    """RECAP dockets naming the person in full (in a filing, or as a party or lawyer), first page."""
+    key = token()
+    if not name_variants(name):
+        raise SourceSkipped("need a given and a family name; surname-only search is not used")
+    body = await get_json(SEARCH, {"type": "r", "q": name_query(name), "highlight": "on"}, is_docket_body, key)
+    return [to_docket(x, name) for x in body["results"][:MAX_HITS]]
 
 
 # Opinion text (DESIGN 4.2 call 3): passages around the candidate's full name, cut by code.
@@ -246,7 +330,6 @@ async def opinion_passages(opinion_id: int, name: str) -> list[str]:
 
 
 # Testimony list check (PLAN M3 3k): is a named case in CourtListener, and does it name the person?
-SNIPPET_PASSAGES = 2
 
 
 def case_phrase(case_name: str) -> str:
@@ -309,23 +392,7 @@ def case_name_query(case_name: str) -> str:
 
 
 def case_query(case_name: str, name: str) -> str:
-    variants = name_variants(name)  # full name and given + family; never the surname alone
-    variants += [p for p in (strip_accents(v) for v in variants) if p not in variants]
-    people = " OR ".join(f'"{v}"' for v in variants)
-    return f"{case_name_query(case_name)} AND ({people})"
-
-
-def snippet_passages(result: dict) -> list[str]:
-    """Highlighted snippet text of a search result: HTML removed, whitespace collapsed, matches first."""
-    opinions = result.get("opinions") if isinstance(result.get("opinions"), list) else []
-    snippets = [text(o.get("snippet")) for o in opinions if isinstance(o, dict)]
-    snippets.sort(key=lambda s: "<mark>" not in s)
-    out = []
-    for s in snippets:
-        passage = clean(s)  # <mark> is inline
-        if passage and passage not in out:
-            out.append(passage[:PASSAGE_CHARS])
-    return out[:SNIPPET_PASSAGES]
+    return f"{case_name_query(case_name)} AND ({name_query(name)})"
 
 
 def case_score(result: dict, court: str | None, year: int | None) -> int:
@@ -339,25 +406,17 @@ def case_score(result: dict, court: str | None, year: int | None) -> int:
 
 
 async def find_case(case_name: str, name: str, court: str | None = None, year: int | None = None) -> dict | None:
-    """One opinion search for a case by name that also names the person (full name, middle initial
-    optional). Several hits: the one matching `year` (date filed) and `court` wins, else the first.
-    Passages come from the search's highlighted snippets (no second call). None if not found."""
+    """One RECAP docket search for a case by name whose filings (or parties) also name the person in
+    full. Several hits: the one matching `year` (date filed) and `court` wins, else the first. The
+    docket as `to_docket` gives it (passages from the search snippets, no second call). None if not found."""
     key = token()
     if not name_variants(name):
         raise SourceSkipped("need a given and a family name; surname-only search is not used")
     if not case_phrase(case_name):
         return None
-    body = await get_json(SEARCH, {"type": "o", "q": case_query(case_name, name), "highlight": "on"},
-                          is_search_body, key)
+    body = await get_json(SEARCH, {"type": "r", "q": case_query(case_name, name), "highlight": "on"},
+                          is_docket_body, key)
     results = body["results"][:MAX_HITS]
     if not results:
         return None
-    best = max(results, key=lambda r: case_score(r, court, year))  # max keeps the first of equals
-    return {
-        "url": SITE + best["absolute_url"],
-        "case_name": clean(best.get("caseName")),
-        "court": clean(best.get("court")),
-        "date_filed": clean(best.get("dateFiled")),
-        "docket_number": clean(best.get("docketNumber")),
-        "passages": snippet_passages(best),
-    }
+    return to_docket(max(results, key=lambda r: case_score(r, court, year)), name)  # max keeps the first of equals

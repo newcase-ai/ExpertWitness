@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app import llm, memory, store
+from app import llm, memory, profile, store
 from app.config import get_settings
 from app.evidence import (
     BAD_ARGUMENTS,
@@ -26,8 +26,8 @@ from app.evidence import (
     refuse,
     squash,
 )
-from app.models import Candidate, Finding, SourceType
-from app.sources import SourceSkipped, host_of, is_blocked, on_domain
+from app.models import PROFILE_SECTIONS, Candidate, Finding, SourceType
+from app.sources import SourceFailed, SourceSkipped, host_of, is_blocked, on_domain
 
 RESULT_MAX = 8_000  # characters of a tool reply as JSON
 TITLE_MAX = 200
@@ -123,6 +123,8 @@ def source_type_of(url: str) -> str:
     """Code-made source type of a finding's URL."""
     host = host_of(url) or ""
     if on_domain(host, ("courtlistener.com",)):
+        if "/docket/" in url:
+            return "courtlistener_docket"
         return "courtlistener_opinion" if "/opinion/" in url else "courtlistener_search"
     if on_domain(host, ("openalex.org",)):
         return "openalex_work" if "/W" in url else "openalex_author"
@@ -286,6 +288,7 @@ class Ctx:
             store.start_activity(self.job_id, tool_name, entry.label, shown, "refused", why)
             return refusal
         seq = store.start_activity(self.job_id, tool_name, entry.label, shown)
+        before = len(self.findings()) if profile.AUTO_UPDATE else None
         call = dataclasses.replace(self, tool=tool_name, detail=None)
         status, detail, reply = "done", None, None
         try:
@@ -303,6 +306,10 @@ class Ctx:
         except SourceSkipped as e:
             status, detail, reply = "skipped", str(e)[:DETAIL_MAX], refuse(f"source not available: {e}")
             call.add_gap(str(e))
+        except SourceFailed as e:  # fixed text from the source: what happened, whether to call again
+            self.run.failures.append((tool_name, type(e).__name__))
+            status, detail, reply = "failed", str(e)[:DETAIL_MAX], refuse(f"{TOOL_FAILED}: {e}")
+            call.add_gap(f"{entry.label} failed: {e}")
         except asyncio.CancelledError:  # the job's own deadline stopped the agent mid-call
             store.finish_activity(self.job_id, seq, "failed", "time limit")
             raise
@@ -318,9 +325,30 @@ class Ctx:
             else:
                 detail = call.detail
         store.finish_activity(self.job_id, seq, status, hide(detail))
+        if before is not None and (new := self.findings()[before:]):  # findings come back in saved order
+            await self.update_profile(new)
         store.set_step(self.job_id, "main_agent", "running",
                        f"{store.tool_calls_finished(self.job_id)} tool calls")
         return reply
+
+    async def update_profile(self, new: list[Finding]) -> None:
+        """The automatic profile update after a tool call saved `new` findings: its own activity row;
+        a failure is a gap (the old profile stays), never raised to the tool or the model."""
+        seq = store.start_activity(self.job_id, "update_profile", "Update profile", {"new_findings": len(new)})
+        try:
+            async with asyncio.timeout(max(self.run.left(), 0)):
+                updated = await profile.update(self.dossier_id, self.expert, new,
+                                               {f.finding_id for f in self.findings()})
+        except asyncio.CancelledError:
+            store.finish_activity(self.job_id, seq, "failed", "time limit")
+            raise
+        except Exception as e:  # noqa: BLE001 - the profile must never break a tool call
+            store.finish_activity(self.job_id, seq, "failed", type(e).__name__)
+            dataclasses.replace(self, tool="update_profile").add_gap(f"profile not updated ({type(e).__name__})")
+            return
+        items = sum(len(getattr(updated, s)) for s in PROFILE_SECTIONS)
+        store.finish_activity(self.job_id, seq, "done",
+                              f"version {updated.version}, {len(new)} new findings, {items} items")
 
 
 # Discovery: every module in this folder registers its tools on import.

@@ -12,7 +12,7 @@ NO_EXPERTS_NOTICE = "No expert-witness evidence found for this name."
 NO_EXPERT_EVIDENCE_NOTE = "No expert-witness evidence found"  # on each candidate without a signal
 SEARCH_SOURCES = frozenset({"openalex", "courtlistener", "web_search"})
 SourceType = Literal[
-    "courtlistener_opinion", "courtlistener_search", "openalex_author", "openalex_work",
+    "courtlistener_opinion", "courtlistener_docket", "courtlistener_search", "openalex_author", "openalex_work",
     "crossref_work", "oig_leie", "web",
 ]
 
@@ -192,6 +192,35 @@ class ResearchStarted(BaseModel):
     job_id: str
     dossier_id: str
     status: JobStatus
+
+
+PROFILE_SECTIONS = ("identity", "expertise", "credentials", "cases", "publications", "red_flags", "not_him",
+                    "conflicts", "open_leads")
+
+
+class ProfileItem(BaseModel):
+    text: str
+    refs: list[str] = []  # the finding ids it rests on (code-checked: real findings of this run)
+    confidence: Literal["high", "low"] = "low"
+
+
+class Profile(BaseModel):
+    """What one research run knows about the expert so far, kept up to date by AI from its findings
+    (app/profile.py). `sources` (finding id -> url, title) is filled for the API only."""
+
+    dossier_id: str
+    version: int = 0
+    updated_at: str | None = None
+    identity: list[ProfileItem] = []  # other forms of the name, current role, employers, cities and states
+    expertise: list[ProfileItem] = []  # field, specialties, typical case types
+    credentials: list[ProfileItem] = []  # degrees, licences, boards and their status
+    cases: list[ProfileItem] = []  # one per case: name, court, year, side, role, what happened
+    publications: list[ProfileItem] = []
+    red_flags: list[ProfileItem] = []  # excluded or criticised testimony, retractions, discipline
+    not_him: list[ProfileItem] = []  # people with the same name ruled out
+    conflicts: list[ProfileItem] = []  # findings that disagree
+    open_leads: list[ProfileItem] = []  # concrete things worth searching next
+    sources: dict[str, dict] = {}
 
 
 class ResearchSummary(BaseModel):

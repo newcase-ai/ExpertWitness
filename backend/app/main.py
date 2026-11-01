@@ -11,6 +11,7 @@ from app.models import (
     CandidateSearchStarted,
     Dossier,
     Job,
+    Profile,
     ResearchFindings,
     ResearchRequest,
     ResearchStarted,
@@ -99,6 +100,18 @@ def get_dossier(dossier_id: str) -> Dossier:
     candidate = store.get_candidate(research.candidate_id)
     return Dossier(dossier_id=dossier_id, candidate_id=research.candidate_id, job_id=research.job_id,
                    status=research.status, display_name=candidate.display_name if candidate else "")
+
+
+@app.get("/dossiers/{dossier_id}/profile")
+def get_profile(dossier_id: str) -> Profile:
+    """The run's profile so far (version 0 and empty before its first update), with `sources`: each
+    cited finding's url and title."""
+    research = store.get_research(dossier_id)
+    if research is None:
+        raise HTTPException(404, "dossier not found")
+    current = store.get_profile(dossier_id)
+    current.sources = {f.finding_id: {"url": f.url, "title": f.title} for f in research.findings}
+    return current
 
 
 @app.get("/dossiers/{dossier_id}/findings")

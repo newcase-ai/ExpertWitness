@@ -195,11 +195,15 @@ def sources_fixture(monkeypatch):
 # Research tools: fake return values of the source functions, keyed "module.function".
 
 
-def cl_hit(oid, date):
-    return {"source": "courtlistener", "url": f"https://www.courtlistener.com/opinion/{oid}/doe-v-example/",
-            "title": f"Doe v. Example Co. {oid}", "note": f"District Court, N.D. Example, filed {date}",
-            "query": "expert", "case": (f"Doe v. Example Co. {oid}", "District Court, N.D. Example", date),
-            "opinion_id": oid, "snippet": "SYNTHETIC-CL-SNIPPET expert Alex Rivera"}
+def cl_docket(did, date, court="District Court, N.D. Example",
+              passage="Exhibit 2: the claim was reviewed by Dr. Alex J. Rivera, a toxicologist", named_as=()):
+    """A RECAP docket as courtlistener.search_dockets / find_case return it (synthetic)."""
+    return {"url": f"https://www.courtlistener.com/docket/{did}/doe-v-example/", "case_name": f"Doe v. Example Co. {did}",
+            "court": court, "docket_number": f"1:{did}-cv-0001", "date_filed": date, "nature_of_suit": "791 ERISA",
+            "named_as": list(named_as),
+            "documents": [{"description": "Exhibit 2, Appeal Decision Letter", "date_filed": date,
+                           "url": f"https://www.courtlistener.com/docket/{did}/12/2/doe-v-example/"}],
+            "passages": [passage] if passage else []}
 
 
 def work(n, year, doi=True, retracted=False):
@@ -228,9 +232,7 @@ def find_case(case_name, name, court=None, year=None):
     """Only "Doe v. Example Co." is in CourtListener."""
     if case_name != "Doe v. Example Co.":
         return None
-    return {"url": "https://www.courtlistener.com/opinion/11/doe-v-example/", "case_name": case_name,
-            "court": "District Court, N.D. Example", "date_filed": "2019-04-02", "docket_number": "1:19-cv-0001",
-            "passages": ["the plaintiff's expert, Alex J. Rivera, testified that"]}
+    return cl_docket(11, "2019-04-02") | {"case_name": case_name}
 
 
 def model_reply(instructions, input, schema=None, web_search=False, output_type=None):
@@ -239,10 +241,10 @@ def model_reply(instructions, input, schema=None, web_search=False, output_type=
 
 
 RESEARCH_SOURCES = {
-    # opinion 11 twice (same opinion, two hits): kept once; newest first
-    "courtlistener.search_opinions": [cl_hit(12, "2018-01-02"), cl_hit(11, "2021-05-01"), cl_hit(11, "2021-05-01")],
-    # "toxicologist" matches the candidate's field "toxicology": the opinion is tied to this person
-    "courtlistener.opinion_passages": ["the plaintiff's expert, Alex J. Rivera, a toxicologist, testified that"],
+    # docket 11 twice (same case, two hits): kept once; newest first. "toxicologist" in the passage
+    # matches the candidate's field "toxicology"
+    "courtlistener.search_dockets": [cl_docket(12, "2018-01-02"), cl_docket(11, "2021-05-01"),
+                                     cl_docket(11, "2021-05-01")],
     "websearch.search_facts": [
         {"url": "https://example.org/news/rivera", "title": "Expert testifies in example trial",
          "facts": ["Testified for the plaintiff in a 2020 example trial"], "snippet": "SYNTHETIC-WEB-SNIPPET"},

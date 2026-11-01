@@ -97,6 +97,7 @@ async def fetch(
     headers: dict | None = None,
     cache: bool = False,
     cache_if: Callable[[object], bool] = non_empty_dict,
+    timeout: httpx.Timeout | None = None,
 ) -> httpx.Response:
     """GET with the source's rate limit. `cache=True` serves/stores bodies in SQLite by URL; a
     response is stored only if it is 2xx, valid JSON and `cache_if(parsed_json)` is True.
@@ -109,7 +110,7 @@ async def fetch(
         return response
     if source in limiters:
         await limiters[source].wait()
-    response = await client.get(url, params=params, headers=headers)
+    response = await client.get(url, params=params, headers=headers, **({"timeout": timeout} if timeout else {}))
     response.from_cache = False
     if cache and response.is_success and should_cache(response.content, cache_if):
         store.cache_put(key, response.content)
