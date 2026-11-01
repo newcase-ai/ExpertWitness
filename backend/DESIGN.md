@@ -813,6 +813,23 @@ has one step row instead of nine. Example (made-up values):
 - Findings change (see 4B.11 D2): `collector` holds the tool name; `kind` is an open string (the
   current kinds stay for tools 1, 9-12; new kinds are listed on each card).
 
+### 4B.6b Run trace (added 2026-11-01, for testing and debugging)
+Every research job also records an ordered **trace** (`app/trace.py`, table `events`), served by
+`GET /jobs/{job_id}/events?after=<seq>&limit=<n>` -> `{"job_id", "events": [...], "last_seq"}` (poll with
+`after` = the last `last_seq`; `after=0` is the whole trace). Event kinds: `run_start` (model, limits,
+caps, tools, instructions, first message), `model_turn` (agent, text, reasoning, tool calls asked for
+with their arguments, tokens), `tool_start` / `tool_end` (full checked arguments; status, detail,
+duration, reply, reply size, error type and message), `tool_error` (an error reply the model got,
+also ADK's own refusals such as a missing argument), `finding`, `gap`, `run_end` (why it stopped, model
+turns, token totals, error). `tool_seq` links an event to the tool call it happened inside (model
+calls inside tools, the profile update, tools calling tools).
+- Content rules: secrets are always `[hidden]` (gotcha 45). Default (safe): tool replies and model text
+  inside tools are cut to 300 characters plus their size (gotcha 15); the pasted testimony list is not
+  stored; errors keep type and message. `DEBUG_TRACE=1` keeps everything in full, tracebacks too: local
+  testing only, never on a shared server. Each event says `debug: true|false`.
+- The research page (`/research/:dossierId`) shows it live: Timeline, Results, Raw log (download JSON).
+- `GET /jobs/{id}`, the activity rows and `GET /dossiers/{id}/findings` are unchanged.
+
 ### 4B.7 What stays in code (6d)
 - Per-tool caps and the job deadline (`Run`); `MAX_AGENT_CALLS` (ADK `max_llm_calls`); `RESULT_MAX`.
 - Argument checking against type hints (`checked_args`); refusals and errors are fixed texts.

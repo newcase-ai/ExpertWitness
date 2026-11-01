@@ -19,6 +19,7 @@ class Settings:
     contact_email: str | None
     database_path: str
     firecrawl_api_key: str | None = None
+    debug_trace: bool = False  # DEBUG_TRACE=1: the run trace keeps everything in full (local testing only)
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -56,4 +57,5 @@ def get_settings() -> Settings:
         contact_email=value("CONTACT_EMAIL"),
         database_path=value("DATABASE_PATH") or DEFAULT_DATABASE_PATH,
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
+        debug_trace=(value("DEBUG_TRACE") or "").lower() in ("1", "true", "yes"),
     )

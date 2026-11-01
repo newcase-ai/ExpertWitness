@@ -2,7 +2,8 @@
 expert until it replies DONE or hits the step or time limit. Its final text is thrown away; only
 what the tools saved counts."""
 
-from app import config, llm
+from app import config, llm, trace
+from app.config import get_settings
 from app.evidence import Run
 from app.models import Candidate
 from app.tools import REGISTRY, Ctx
@@ -67,5 +68,11 @@ async def research(job_id: str, dossier_id: str, expert: Candidate,
     run = Run(seconds=config.RESEARCH_SECONDS, caps=caps)
     ctx = Ctx(job_id=job_id, dossier_id=dossier_id, expert=expert, run=run)
     agent = llm.make_agent("main_agent", INSTRUCTIONS, tools=[ctx.adk_tool(name) for name in REGISTRY])
-    return await llm.run_agent(agent, first_message(expert, testimony_list),
-                               max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())
+    message = first_message(expert, testimony_list)
+    # the pasted testimony list is never stored, except in a DEBUG_TRACE run
+    shown = message if trace.full() or not testimony_list else first_message(
+        expert, f"[testimony list: {len(testimony_list)} characters, not stored]")
+    trace.record("run_start", "main_agent", model=get_settings().model_name, seconds=config.RESEARCH_SECONDS,
+                 max_model_calls=config.MAX_AGENT_CALLS, caps=caps, tools=list(REGISTRY),
+                 instructions=INSTRUCTIONS, message=shown)
+    return await llm.run_agent(agent, message, max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())

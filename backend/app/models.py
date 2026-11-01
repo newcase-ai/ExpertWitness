@@ -145,6 +145,25 @@ class ActivityRow(BaseModel):
     finished_at: str | None = None
 
 
+class TraceEvent(BaseModel):
+    """One step of a research run's trace (app/trace.py): a model turn, a tool call starting or
+    ending, a finding, a gap, the run starting or ending. `tool_seq`: the activity seq of the tool
+    call it happened inside (nested model calls, tools calling tools)."""
+
+    seq: int
+    at: str
+    kind: str
+    agent: str | None = None
+    tool_seq: int | None = None
+    data: dict = {}
+
+
+class TraceEvents(BaseModel):
+    job_id: str
+    events: list[TraceEvent]
+    last_seq: int  # pass as `after` to get only newer events
+
+
 class JobResult(BaseModel):
     kind: Literal["dossier", "candidate_search"]
     id: str

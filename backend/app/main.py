@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 
 from app import http, jobs, store
 from app.config import get_settings
@@ -16,6 +16,7 @@ from app.models import (
     ResearchRequest,
     ResearchStarted,
     SearchSummary,
+    TraceEvents,
 )
 
 # The server log: one line per job event and agent tool call (app/store.py), without the UI's status
@@ -74,6 +75,16 @@ def get_job(job_id: str) -> Job:
     if job is None:
         raise HTTPException(404, "job not found")
     return job
+
+
+@app.get("/jobs/{job_id}/events")
+def get_job_events(job_id: str, after: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000)) -> TraceEvents:
+    """The run trace (app/trace.py): events with seq > `after`, oldest first. Poll with `after` set to
+    the last `last_seq` to get only new ones; after=0 gives the whole trace."""
+    if store.get_job(job_id) is None:
+        raise HTTPException(404, "job not found")
+    events = store.events(job_id, after, limit)
+    return TraceEvents(job_id=job_id, events=events, last_seq=events[-1].seq if events else after)
 
 
 @app.post("/research", status_code=202)

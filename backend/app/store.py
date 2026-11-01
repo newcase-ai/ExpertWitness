@@ -25,6 +25,7 @@ from app.models import (
     ResearchFindings,
     ResearchSummary,
     SearchSummary,
+    TraceEvent,
 )
 
 SCHEMA = """
@@ -58,6 +59,10 @@ create table if not exists activity (
     job_id text not null, seq integer not null, tool text not null, label text not null,
     status text not null, args text not null, detail text, started_at text not null, finished_at text,
     primary key (job_id, seq)
+);
+create table if not exists events (
+    job_id text not null, seq integer not null, at text not null, kind text not null, agent text,
+    tool_seq integer, data text not null, primary key (job_id, seq)
 );
 create table if not exists site_manuals (
     domain text primary key, how_to text not null, login_notes text not null, updated_at text not null,
@@ -446,6 +451,23 @@ def finish_activity(job_id: str, seq: int, status: str, detail: str | None = Non
 def activity(job_id: str) -> list[ActivityRow]:
     rows = execute("select * from activity where job_id = ? order by seq", (job_id,))
     return [ActivityRow(**dict(r) | {"args": json.loads(r["args"])}) for r in rows]
+
+
+# Run trace (app/trace.py): every model turn, tool call, finding and gap of a research job, in order
+
+
+def add_event(job_id: str, kind: str, agent: str | None, tool_seq: int | None, data: dict) -> int:
+    rows = execute(
+        "insert into events (job_id, seq, at, kind, agent, tool_seq, data)"
+        " select ?, coalesce(max(seq), 0) + 1, ?, ?, ?, ?, ? from events where job_id = ? returning seq",
+        (job_id, now(), kind, agent, tool_seq, json.dumps(data, default=str), job_id),
+    )
+    return rows[0]["seq"]
+
+
+def events(job_id: str, after: int = 0, limit: int = 500) -> list[TraceEvent]:
+    rows = execute("select * from events where job_id = ? and seq > ? order by seq limit ?", (job_id, after, limit))
+    return [TraceEvent(**dict(r) | {"data": json.loads(r["data"])}) for r in rows]
 
 
 def tool_calls_finished(job_id: str) -> int:

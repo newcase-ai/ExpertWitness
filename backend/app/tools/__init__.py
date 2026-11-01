@@ -9,12 +9,13 @@ import inspect
 import json
 import mimetypes
 import pkgutil
+import time
 import typing
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from app import llm, memory, profile, store
+from app import llm, memory, profile, store, trace
 from app.config import get_settings
 from app.evidence import (
     BAD_ARGUMENTS,
@@ -186,11 +187,15 @@ class Ctx:
         finding = Finding(collector=self.tool or "main_agent", kind=kind, title=title[:TITLE_MAX], url=url,
                           source_type=source_type or source_type_of(url), retrieved_at=store.now(),
                           confidence=confidence, facts=facts, note=note)
-        return store.add_finding(self.dossier_id, finding)
+        ref = store.add_finding(self.dossier_id, finding)
+        trace.record("finding", cut=trace.PREVIEW, ref=ref, kind=kind, title=finding.title, url=url,
+                     confidence=confidence, collector=finding.collector, note=note, facts=facts)
+        return ref
 
     def add_gap(self, reason: str) -> None:
         """Save a gap for this tool. Fixed or code-made text only."""
         store.add_gap(self.dossier_id, self.tool or "main_agent", reason)
+        trace.record("gap", step=self.tool or "main_agent", reason=reason)
 
     def findings(self, kind: str | None = None) -> list[Finding]:
         return [f for f in store.findings(self.dossier_id) if kind is None or f.kind == kind]
@@ -280,17 +285,22 @@ class Ctx:
         try:
             arguments = checked_args(model_view(tool_name, lambda: None), (), args)
         except (TypeError, ValueError):
-            store.start_activity(self.job_id, tool_name, entry.label, {}, "refused", "bad arguments")
+            s = store.start_activity(self.job_id, tool_name, entry.label, {}, "refused", "bad arguments")
+            trace.record("tool_end", cut=trace.PREVIEW, seq=s, tool=tool_name, status="refused",
+                         detail="bad arguments", args=args)  # the model's arguments as sent
             return refuse(BAD_ARGUMENTS)
         shown = short_args(arguments)
         if refusal := self.run.check(tool_name):
             why = "time limit" if self.run.left() <= 0 else "cap used up"
-            store.start_activity(self.job_id, tool_name, entry.label, shown, "refused", why)
+            s = store.start_activity(self.job_id, tool_name, entry.label, shown, "refused", why)
+            trace.record("tool_end", seq=s, tool=tool_name, status="refused", detail=why, args=arguments)
             return refusal
         seq = store.start_activity(self.job_id, tool_name, entry.label, shown)
+        trace.record("tool_start", seq=seq, tool=tool_name, label=entry.label, args=arguments)
+        started, inside = time.monotonic(), trace.TOOL.set(seq)  # model calls inside link to this call
         before = len(self.findings()) if profile.AUTO_UPDATE else None
         call = dataclasses.replace(self, tool=tool_name, detail=None)
-        status, detail, reply = "done", None, None
+        status, detail, reply, size, err = "done", None, None, None, None
         try:
             async with asyncio.timeout(self.run.left()) as clock:
                 reply = await entry.fn(call, **arguments)
@@ -298,22 +308,29 @@ class Ctx:
                 raise TypeError("tool reply is not a dict")
             size = len(json.dumps(reply))
         except TimeoutError as e:
+            err = e
             if not clock.expired():
                 status, detail, reply = "failed", type(e).__name__, refuse(TOOL_FAILED)
                 call.add_gap(f"{entry.label} failed ({type(e).__name__})")
             else:
                 status, detail, reply = "failed", "time limit", refuse(LIMIT_REACHED)
         except SourceSkipped as e:
+            err = e
             status, detail, reply = "skipped", str(e)[:DETAIL_MAX], refuse(f"source not available: {e}")
             call.add_gap(str(e))
         except SourceFailed as e:  # fixed text from the source: what happened, whether to call again
+            err = e
             self.run.failures.append((tool_name, type(e).__name__))
             status, detail, reply = "failed", str(e)[:DETAIL_MAX], refuse(f"{TOOL_FAILED}: {e}")
             call.add_gap(f"{entry.label} failed: {e}")
         except asyncio.CancelledError:  # the job's own deadline stopped the agent mid-call
             store.finish_activity(self.job_id, seq, "failed", "time limit")
+            trace.record("tool_end", seq=seq, tool=tool_name, status="failed", detail="time limit",
+                         ms=round((time.monotonic() - started) * 1000))
+            trace.TOOL.reset(inside)
             raise
         except Exception as e:  # noqa: BLE001 - a tool never raises to the model; only the type is kept
+            err = e
             self.run.failures.append((tool_name, type(e).__name__))
             status, detail, reply = "failed", type(e).__name__, refuse(TOOL_FAILED)
             call.add_gap(f"{entry.label} failed ({type(e).__name__})")
@@ -325,6 +342,10 @@ class Ctx:
             else:
                 detail = call.detail
         store.finish_activity(self.job_id, seq, status, hide(detail))
+        trace.record("tool_end", cut=trace.PREVIEW, seq=seq, tool=tool_name, status=status, detail=detail,
+                     ms=round((time.monotonic() - started) * 1000), reply=reply, reply_chars=size,
+                     error=trace.error(err) if err else None)
+        trace.TOOL.reset(inside)
         if before is not None and (new := self.findings()[before:]):  # findings come back in saved order
             await self.update_profile(new)
         store.set_step(self.job_id, "main_agent", "running",
@@ -335,20 +356,30 @@ class Ctx:
         """The automatic profile update after a tool call saved `new` findings: its own activity row;
         a failure is a gap (the old profile stays), never raised to the tool or the model."""
         seq = store.start_activity(self.job_id, "update_profile", "Update profile", {"new_findings": len(new)})
+        trace.record("tool_start", seq=seq, tool="update_profile", label="Update profile",
+                     args={"new_findings": [f.finding_id for f in new]})
+        started, inside = time.monotonic(), trace.TOOL.set(seq)
         try:
             async with asyncio.timeout(max(self.run.left(), 0)):
                 updated = await profile.update(self.dossier_id, self.expert, new,
                                                {f.finding_id for f in self.findings()})
         except asyncio.CancelledError:
             store.finish_activity(self.job_id, seq, "failed", "time limit")
+            trace.TOOL.reset(inside)
             raise
         except Exception as e:  # noqa: BLE001 - the profile must never break a tool call
             store.finish_activity(self.job_id, seq, "failed", type(e).__name__)
+            trace.record("tool_end", seq=seq, tool="update_profile", status="failed", detail=type(e).__name__,
+                         ms=round((time.monotonic() - started) * 1000), error=trace.error(e))
+            trace.TOOL.reset(inside)
             dataclasses.replace(self, tool="update_profile").add_gap(f"profile not updated ({type(e).__name__})")
             return
         items = sum(len(getattr(updated, s)) for s in PROFILE_SECTIONS)
-        store.finish_activity(self.job_id, seq, "done",
-                              f"version {updated.version}, {len(new)} new findings, {items} items")
+        detail = f"version {updated.version}, {len(new)} new findings, {items} items"
+        store.finish_activity(self.job_id, seq, "done", detail)
+        trace.record("tool_end", seq=seq, tool="update_profile", status="done", detail=detail,
+                     ms=round((time.monotonic() - started) * 1000))
+        trace.TOOL.reset(inside)
 
 
 # Discovery: every module in this folder registers its tools on import.

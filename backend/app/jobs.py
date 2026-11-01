@@ -2,7 +2,7 @@
 
 import asyncio
 
-from app import agents, llm, main_agent, store
+from app import agents, llm, main_agent, store, trace
 from app.models import Candidate
 
 CANDIDATE_STEPS = [
@@ -65,18 +65,28 @@ async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testi
     finished before it (DESIGN 4B.11 D5). Any other crash fails the job."""
     store.start_job(job_id)
     store.set_step(job_id, "main_agent", "running")
+    traced = trace.start(job_id)  # every model turn and tool call of this job goes to its trace
     try:
         try:
             run = await main_agent.research(job_id, dossier_id, candidate, testimony_list)
         except llm.ModelError as exc:
             store.add_gap(dossier_id, "main_agent", str(exc))
+            trace.record("gap", step="main_agent", reason=str(exc))
             store.set_step(job_id, "main_agent", "failed", str(exc))
-            if not store.tool_calls_finished(job_id):
+            failed = not store.tool_calls_finished(job_id)
+            trace.record("run_end", "main_agent", stopped="model error", job="failed" if failed else "done",
+                         error=trace.error(exc), **trace.totals())
+            if failed:
                 store.finish_job(job_id, "failed", error=str(exc))
                 return
         else:
             store.set_step(job_id, "main_agent", "done", main_agent.stop_detail(run.stopped))
+            trace.record("run_end", "main_agent", stopped=main_agent.stop_detail(run.stopped), job="done",
+                         final_text=run.text, model_calls=run.calls, **trace.totals())
     except Exception as exc:  # noqa: BLE001 - any crash must mark the job failed
+        trace.record("run_end", "main_agent", stopped="crash", job="failed", error=trace.error(exc), **trace.totals())
         store.finish_job(job_id, "failed", error=str(exc) or type(exc).__name__)
         return
+    finally:
+        trace.stop(traced)
     store.finish_job(job_id, "done", result={"kind": "dossier", "id": dossier_id})

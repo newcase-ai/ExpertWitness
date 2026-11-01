@@ -24,6 +24,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, ValidationError
 
+from app import trace
 from app.config import get_settings, is_banned_model
 
 BASE_URL = "https://api.meta.ai/v1"
@@ -127,8 +128,11 @@ async def run_agent(agent: LlmAgent, prompt: str, *, max_llm_calls: int, timeout
                                       run_config=RunConfig(max_llm_calls=max_llm_calls))
             async with contextlib.aclosing(events):
                 async for event in events:
+                    if event.get_function_responses():
+                        trace.tool_errors(agent.name, event)  # what the model was told, ADK's own refusals too
                     if event.author == "user" or not event.content or event.get_function_responses():
                         continue
+                    trace.model_turn(agent.name, event)  # no-op outside a research job
                     out.calls += 1
                     if event.is_final_response():
                         out.text += "".join(p.text or "" for p in event.content.parts or [] if not p.thought)

@@ -79,10 +79,50 @@ export async function loadSearch(searchId: string): Promise<ExpertCandidate[]> {
 }
 
 export interface ResearchJob {
+  job_id: string
   status: string
   error: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  steps: { key: string; label: string; status: string; detail: string | null }[]
   activity: { seq: number; label: string; status: string; detail: string | null }[]
 }
+
+// One step of a research run's trace (backend app/trace.py): a model turn, a tool call starting or
+// ending, a finding, a gap, an error the agent was told, the run starting or ending. `tool_seq` is
+// the tool call it happened inside (model calls inside a tool, tools calling tools).
+export type TraceKind =
+  | 'run_start'
+  | 'model_turn'
+  | 'tool_start'
+  | 'tool_end'
+  | 'tool_error'
+  | 'finding'
+  | 'gap'
+  | 'run_end'
+
+export interface TraceEvent {
+  seq: number
+  at: string
+  kind: TraceKind
+  agent: string | null
+  tool_seq: number | null
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  data: Record<string, any> & { debug: boolean }
+}
+
+export const getJob = (jobId: string): Promise<ResearchJob> => getJson(`/api/jobs/${jobId}`)
+
+// The run's trace events after `after` (0 = all), oldest first; pass `last_seq` back to get only new ones.
+export const getEvents = (
+  jobId: string,
+  after = 0
+): Promise<{ events: TraceEvent[]; last_seq: number }> =>
+  getJson(`/api/jobs/${jobId}/events?after=${after}&limit=2000`)
+
+export const getFindings = (dossierId: string): Promise<ResearchFindings> =>
+  getJson(`/api/dossiers/${dossierId}/findings`)
 
 export interface Finding {
   finding_id: string
