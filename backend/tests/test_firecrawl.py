@@ -78,3 +78,48 @@ def test_redirect_to_blocked_site_is_dropped(sources, with_key):
     sources(routes=answer({"markdown": MARKDOWN, "metadata": {"url": "https://www.linkedin.com/in/x"}}))
     with pytest.raises(SourceSkipped):
         asyncio.run(firecrawl.scrape(PAGE))
+
+
+@pytest.fixture
+def no_wait(monkeypatch):
+    monkeypatch.setattr(firecrawl, "RETRY_WAIT", 0)
+
+
+def test_timeout_or_busy_is_retried_once(sources, with_key, no_wait):
+    answers = [httpx.Response(408, json={"success": False}),
+               httpx.Response(200, json={"success": True, "data": {"markdown": MARKDOWN, "metadata": {}}})]
+    _, seen = sources(routes={"api.firecrawl.dev": lambda request: answers.pop(0)})
+    assert asyncio.run(firecrawl.scrape(PAGE))["markdown"] == MARKDOWN
+    assert len(seen) == 2
+    _, seen = sources(routes={"api.firecrawl.dev": (429, {"success": False})})
+    with pytest.raises(RuntimeError, match="^Firecrawl HTTP 429$"):
+        asyncio.run(firecrawl.scrape(PAGE))
+    assert len(seen) == 2
+
+
+def test_server_error_is_not_retried(sources, with_key, no_wait):
+    _, seen = sources(routes={"api.firecrawl.dev": (500, {"success": False})})
+    with pytest.raises(RuntimeError, match="^Firecrawl HTTP 500$"):
+        asyncio.run(firecrawl.scrape(PAGE))
+    assert len(seen) == 1
+
+
+def test_network_errors_become_fixed_text(sources, with_key, no_wait):
+    def timeout(request):
+        raise httpx.ReadTimeout("SYNTHETIC detail", request=request)
+    _, seen = sources(routes={"api.firecrawl.dev": timeout})
+    with pytest.raises(RuntimeError, match="^Firecrawl timed out$"):
+        asyncio.run(firecrawl.scrape(PAGE))
+    assert len(seen) == 2
+
+    def refused(request):
+        raise httpx.ConnectError("SYNTHETIC detail", request=request)
+    sources(routes={"api.firecrawl.dev": refused})
+    with pytest.raises(RuntimeError, match=r"^Firecrawl connection failed \(ConnectError\)$"):
+        asyncio.run(firecrawl.scrape(PAGE))
+
+
+def test_timeout_is_sent_to_firecrawl(sources, with_key):
+    _, seen = sources(routes=answer({"markdown": MARKDOWN, "metadata": {}}))
+    asyncio.run(firecrawl.scrape(PAGE, timeout_ms=60_000))
+    assert json.loads(seen[0].content)["timeout"] == 60_000

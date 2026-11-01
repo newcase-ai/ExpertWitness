@@ -48,6 +48,7 @@ BLOCKED_NOW = {"login": "this site needs a login; it is now blocked for future j
                "paywall": "this site is behind a paywall; it is now blocked for future jobs",
                "captcha": "this site shows a robot check; it is now blocked for future jobs"}
 NO_TEXT = "Download a file: no text version (Firecrawl could not read the file)"
+PDF_TIMEOUT_MS = 60_000  # turning a PDF into text is Firecrawl's slowest job; 30 s was too short live
 
 
 def clean(url: str) -> str:
@@ -226,14 +227,17 @@ async def download_file(ctx: Ctx, url: str) -> dict:
     if mime == "text/plain":
         text = data.decode("utf-8", errors="replace")
     else:
+        why = "no text"
         try:
-            page = await firecrawl.scrape(final)
-            if not url_refusal(ctx, page["url"]):  # Firecrawl's own redirects (gotcha 40)
+            page = await firecrawl.scrape(final, PDF_TIMEOUT_MS if mime == "application/pdf" else firecrawl.TIMEOUT_MS)
+            if url_refusal(ctx, page["url"]):  # Firecrawl's own redirects (gotcha 40)
+                why = "Firecrawl ended on a refused address"
+            else:
                 text, pages = page["markdown"], page["pages"] or pages
-        except (SourceSkipped, RuntimeError):
-            pass  # the file is still saved, without text (gap below)
+        except (SourceSkipped, RuntimeError) as e:  # fixed texts only (see firecrawl.scrape)
+            why = str(e)  # the file is still saved, without text (gap below)
         if text is None:
-            ctx.add_gap(NO_TEXT)
+            ctx.add_gap(f"{NO_TEXT}: {why}")
     if mime in ALLOWED_MIME[1:3] and text is not None and robot_check(text):  # web pages
         return block(ctx, final, "captcha")
     if text is not None:  # no lone surrogates: the text file must encode as UTF-8

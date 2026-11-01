@@ -16,6 +16,7 @@ main content only. The markdown stays in memory: it is returned to the caller, n
 URL cache or the database (only facts the caller extracts from it are stored).
 """
 
+import asyncio
 from urllib.parse import urlsplit
 
 import httpx
@@ -26,7 +27,8 @@ from app.sources import SourceSkipped, is_blocked
 
 SCRAPE = "https://api.firecrawl.dev/v2/scrape"
 TIMEOUT_MS = 30_000  # Firecrawl's own page timeout; our HTTP timeout is a little longer
-HTTP_TIMEOUT = httpx.Timeout(TIMEOUT_MS / 1000 + 15, connect=5.0)
+RETRY_STATUS = (408, 429, 502, 503, 504)  # Firecrawl timed out, rate limit or busy: one retry
+RETRY_WAIT = 2.0  # seconds before that retry
 MAX_MARKDOWN = 60_000
 MAX_PDF_PAGES = 10  # each PDF page costs one more credit
 
@@ -40,12 +42,12 @@ class PageError(RuntimeError):
         self.status, self.url = status, url
 
 
-def request_body(url: str) -> dict:
+def request_body(url: str, timeout_ms: int = TIMEOUT_MS) -> dict:
     return {
         "url": url,
         "formats": ["markdown"],
         "onlyMainContent": True,
-        "timeout": TIMEOUT_MS,
+        "timeout": timeout_ms,
         "parsers": [{"type": "pdf", "maxPages": MAX_PDF_PAGES}],
         "proxy": "basic",
         "blockAds": True,
@@ -76,20 +78,35 @@ def scrape_data(body: object) -> dict | None:
     return data if isinstance(data, dict) and isinstance(data.get("markdown"), str) else None
 
 
-async def scrape(url: str) -> dict:
+async def scrape(url: str, timeout_ms: int = TIMEOUT_MS) -> dict:
     """Read one page with Firecrawl: {"url", "title", "markdown", "pages"} (markdown capped at
-    MAX_MARKDOWN; pages = a PDF's page count, else None).
+    MAX_MARKDOWN; pages = a PDF's page count, else None). `timeout_ms` is Firecrawl's own time limit
+    (PDFs need more). A timeout, rate limit or busy answer is retried once.
     SourceSkipped: no key, not http(s), or a blocked site (also after redirects).
-    RuntimeError: Firecrawl answered with an error; PageError: the page did (status code only)."""
+    RuntimeError: Firecrawl answered with an error, timed out or could not be reached (fixed text);
+    PageError: the page did (status code only)."""
     key = get_settings().firecrawl_api_key
     if not key:
         raise SourceSkipped("FIRECRAWL_API_KEY is not set")
     check_url(url)
-    if limiter := http.limiters.get("firecrawl"):
-        await limiter.wait()
-    r = await http.get_client().post(
-        SCRAPE, json=request_body(url), headers={"Authorization": f"Bearer {key}"}, timeout=HTTP_TIMEOUT
-    )
+    timeout = httpx.Timeout(timeout_ms / 1000 + 15, connect=5.0)
+    for attempt in (1, 2):
+        if limiter := http.limiters.get("firecrawl"):
+            await limiter.wait()
+        try:
+            r = await http.get_client().post(
+                SCRAPE, json=request_body(url, timeout_ms), headers={"Authorization": f"Bearer {key}"}, timeout=timeout
+            )
+        except httpx.TimeoutException:
+            r = None
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Firecrawl connection failed ({type(e).__name__})") from None
+        if r is not None and r.status_code not in RETRY_STATUS:
+            break
+        if attempt == 1:
+            await asyncio.sleep(RETRY_WAIT)
+    if r is None:
+        raise RuntimeError("Firecrawl timed out")
     if r.status_code != 200:
         raise RuntimeError(f"Firecrawl HTTP {r.status_code}")
     try:
