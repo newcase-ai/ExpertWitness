@@ -4,6 +4,7 @@ Verified 2026-10-28 against the official docs:
 - Endpoint: `POST https://api.firecrawl.dev/v2/scrape`, header `Authorization: Bearer <key>`.
   Body `url`, `formats`, `onlyMainContent`, `timeout` (ms), `parsers` (PDF), `proxy`, `storeInCache`.
   Answer `{"success": true, "data": {"markdown", "metadata": {"title", "sourceURL", "url", "statusCode"}}}`;
+  PDFs also get `metadata.totalPages` (true page count, may be missing) and `numPages` (pages parsed);
   errors 400/402/403/404/409/429/500/503 with `{"success": false, "error"}`.
   https://docs.firecrawl.dev/api-reference/endpoint/scrape
 - Rate limits (hosted): Free 10 scrapes/min, Hobby 100/min. https://docs.firecrawl.dev/rate-limits
@@ -28,6 +29,15 @@ TIMEOUT_MS = 30_000  # Firecrawl's own page timeout; our HTTP timeout is a littl
 HTTP_TIMEOUT = httpx.Timeout(TIMEOUT_MS / 1000 + 15, connect=5.0)
 MAX_MARKDOWN = 60_000
 MAX_PDF_PAGES = 10  # each PDF page costs one more credit
+
+
+class PageError(RuntimeError):
+    """The page itself answered with an error; `status` is its HTTP status code, `url` the page's
+    final URL (after redirects)."""
+
+    def __init__(self, status: int, url: str = ""):
+        super().__init__(f"page HTTP {status}")
+        self.status, self.url = status, url
 
 
 def request_body(url: str) -> dict:
@@ -67,9 +77,10 @@ def scrape_data(body: object) -> dict | None:
 
 
 async def scrape(url: str) -> dict:
-    """Read one page with Firecrawl: {"url", "title", "markdown"} (markdown capped at MAX_MARKDOWN).
+    """Read one page with Firecrawl: {"url", "title", "markdown", "pages"} (markdown capped at
+    MAX_MARKDOWN; pages = a PDF's page count, else None).
     SourceSkipped: no key, not http(s), or a blocked site (also after redirects).
-    RuntimeError: Firecrawl or the page answered with an error (status code only)."""
+    RuntimeError: Firecrawl answered with an error; PageError: the page did (status code only)."""
     key = get_settings().firecrawl_api_key
     if not key:
         raise SourceSkipped("FIRECRAWL_API_KEY is not set")
@@ -90,9 +101,11 @@ async def scrape(url: str) -> dict:
         raise RuntimeError("Firecrawl returned an unexpected response")
     meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
     status = meta.get("statusCode")
-    if isinstance(status, int) and status >= 400:
-        raise RuntimeError(f"page HTTP {status}")
     final = first_text(meta.get("url")) or url
+    if isinstance(status, int) and status >= 400:
+        raise PageError(status, final)
     if final != url:
         check_url(final)  # a redirect to a blocked site is dropped
-    return {"url": final, "title": first_text(meta.get("title")), "markdown": data["markdown"][:MAX_MARKDOWN]}
+    pages = next((n for n in (meta.get("totalPages"), meta.get("numPages")) if isinstance(n, int)), None)
+    return {"url": final, "title": first_text(meta.get("title")), "markdown": data["markdown"][:MAX_MARKDOWN],
+            "pages": pages}

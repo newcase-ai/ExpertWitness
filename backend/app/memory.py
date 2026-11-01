@@ -19,6 +19,13 @@ SECRET = re.compile(
     r"(?i)\b(pass(word|wd|code)?|pwd|pin|token|secret|api[ _-]?key|access[ _-]?key|client[ _-]?secret)"
     r"\s*[:=]|\bbearer\s+\S"
 )
+# Signed or token links: a query parameter NAMED like a signature, credential, token, auth or session id
+# (S3/GCS X-Amz-*/X-Goog-*, Azure sig, CloudFront Signature/Key-Pair-Id, access_token, accessToken,
+# PHPSESSID). Not `session=2023` (legislature sessions), `author=`, `key=`, `id=` or `file=`.
+URL_SECRET = re.compile(
+    r"(?i)[?&;#](x-(amz|goog)-[\w-]*|sig|signature|credential|key-pair-id|[\w.-]*token[\w.-]*|auth"
+    r"|(php|j)?sess(ion)?id)="
+)
 LONG_NUMBER = re.compile(r"\d(?: ?\d){11,}")  # 12+ digits in a row (card numbers), spaces allowed
 DASHED_NUMBER = re.compile(r"\d(?:[ -]?\d){11,18}")  # 4111-1111-1111-1111: a card only if Luhn-valid
 # Never card numbers: ORCID ids (0000-0002-1825-0097, about 1 in 10 passes Luhn by chance), ISBN-13 and
@@ -37,10 +44,10 @@ def luhn(digits: str) -> bool:
 
 def looks_secret(text: str | None, url: bool = False) -> bool:
     """True if `text` looks like a password, token, API key or card number. A URL is checked for
-    labelled secrets only (long numeric ids are common in links)."""
+    labelled secrets and signed or token query parameters only (long numeric ids are common in links)."""
     if not text:
         return False
-    if SECRET.search(text):
+    if SECRET.search(text) or URL_SECRET.search(text):
         return True
     if url:
         return False

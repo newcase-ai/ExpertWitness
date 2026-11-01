@@ -937,13 +937,32 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   dropped (test); no snippet stored (test); open web search with no sites works (test); no key -> skipped (test).
 
 **Tool 7: web reader and download (engineer, T7).** File `app/tools/web_reader.py`. Two tools.
-- `read_web_page(url: str)`: label "Read a web page", cap 8. Firecrawl `scrape` after
-  `ctx.fetch_ok`; reply `{"url", "title", "text"}` with text cut so the reply fits `RESULT_MAX`.
-  Nothing saved; a login, paywall or captcha page -> `memory.block_site` and a refusal.
-- `download_file(url: str)`: label "Download a file", cap 10. Saves the file with `ctx.save_file`
-  plus a text version (Firecrawl markdown for pages and PDFs, `MAX_PDF_PAGES`). Reply `{"file_id", "mime", "pages"}`.
-- May add to `app/sources/firecrawl.py` (T7 owns additions there); plain downloads use `app/http.py`.
-- Legal: gotchas 24, 25 (status code, redirect re-check), 4.
+- Both tools: scheme and host lower-cased, then a strict URL check (http(s), at most 2,000 characters, no spaces, hidden
+  characters or `\`; the host part only plain ASCII `[a-z0-9.-]` plus a port, so no `user@`, `%`,
+  brackets or look-alike letters), then `ctx.fetch_ok`; Firecrawl's final URL gets the same full check.
+  No Firecrawl key -> skipped + gap.
+- Blocks (`memory.block_site`, all future jobs) the host that answered, only on clear signs: page
+  401 -> login, 402 -> paywall, a short web page (never a PDF) with a real block-page phrase ("verify
+  you are human", "checking your browser", "cf-chl", "are you a robot?", "complete the security check
+  to access"; not a bare "captcha") -> captcha; then a fixed refusal. A final host that fails the URL
+  check is refused, never blocked. 403 or any other error fails this call only.
+- `read_web_page(url: str)`: label "Read a web page", cap 8. Firecrawl `scrape`; reply `{"url", "title", "text"}`, text (then title, url) cut to fit `RESULT_MAX`.
+  Nothing saved (no finding; page text never in the DB, activity, gaps or errors).
+- `download_file(url: str)`: label "Download a file", cap 10. Only PDF (must start `%PDF`), HTML/XHTML
+  and plain text, at most `FILE_MAX` (Content-Length and a running total while streaming). Redirects
+  followed by hand (max 5), each hop through the URL check, `fetch_ok`, a secret-looking-URL refusal
+  (`memory.looks_secret`: labelled secrets and query parameters named like signatures, credentials,
+  tokens, auth or session ids, e.g. S3/GCS/Azure/CloudFront signed links) and an internal-address guard (IP literals, localhost/.local/.internal,
+  dot-less hosts, and hosts resolving to any address that is not global, or is multicast or
+  reserved; DNS rebinding not covered). Same asked or final URL already saved for this dossier ->
+  that `file_id` (an asked URL that redirected is remembered in process, no fetch). Text version:
+  plain text as is, pages and PDFs via Firecrawl (`MAX_PDF_PAGES`), cleaned to valid UTF-8; if
+  Firecrawl fails the file is still saved with a gap. Reply `{"file_id", "mime", "pages",
+  "has_text"}` (pages: Firecrawl `totalPages` or `numPages`, else a count of PDF page objects, else
+  null); already saved -> `{"file_id", "mime", "has_text", "already_saved": true}`.
+- `app/sources/firecrawl.py`: `scrape` also returns `pages` and raises `PageError` (a RuntimeError
+  with `.status` and the final `.url`) when the page itself answered with an error.
+- Legal: gotchas 1-4, 24, 25 (status code, redirect re-check), 40 (API hosts).
 - Done when: page read without storing text (test); file + text saved under `data/files/` (test);
   redirect to a banned domain refused (test); captcha page blocks the domain (test).
 

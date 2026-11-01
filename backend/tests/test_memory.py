@@ -97,3 +97,31 @@ def test_no_secret_lets_orcid_ids_isbn13_and_dois_through(text):
 def test_no_secret_still_refuses_card_numbers(text):
     with pytest.raises(ValueError, match="secret"):
         memory.no_secret(text)
+
+
+# Signed or token links (synthetic values): flagged by the parameter NAME, so every tool, finding and
+# activity row hides or refuses them.
+SIGNED_URLS = [
+    "https://bucket.s3.amazonaws.com/cv.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAEXAMPLE",
+    "https://storage.googleapis.com/b/cv.pdf?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Signature=ab12",
+    "https://acct.blob.core.windows.net/c/cv.pdf?sv=2022-11-02&sig=abc%3D",
+    "https://d1.cloudfront.net/cv.pdf?Expires=1700000000&Signature=abc&Key-Pair-Id=K2EXAMPLE",
+    "https://example.org/cv.pdf?access_token=abc", "https://example.org/cv.pdf?accessToken=abc",
+    "https://example.org/cb#id_token=abc", "https://example.org/cv.pdf?auth=abc",
+    "https://example.org/cv.pdf?sessionid=abc", "https://example.org/a;jsessionid=ABC123",
+    "https://example.org/a.php?PHPSESSID=abc", "https://example.org/a?credential=abc",
+]
+
+
+@pytest.mark.parametrize("url", SIGNED_URLS)
+def test_signed_or_token_links_look_secret(url):
+    assert memory.looks_secret(url, url=True)
+
+
+@pytest.mark.parametrize("url", [
+    "https://example.gov/case?id=123", "https://example.gov/view?docid=88", "https://example.gov/download.aspx?file=a.pdf",
+    "https://legislature.example.gov/bills?session=2023", "https://example.org/search?author=rivera",
+    "https://example.org/map?key=abc", "https://example.org/a?signed=yes&designation=md",
+])
+def test_normal_links_do_not_look_secret(url):
+    assert not memory.looks_secret(url, url=True)
