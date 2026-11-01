@@ -146,3 +146,32 @@ export interface SearchSummary {
 }
 
 export const listSearches = (): Promise<SearchSummary[]> => getJson('/api/candidate-searches')
+
+// What a research run knows about the expert so far, kept up to date by the backend after every
+// tool that saves findings. Each item cites finding ids; `sources` maps them to url and title.
+export const PROFILE_SECTIONS = [
+  'identity',
+  'expertise',
+  'credentials',
+  'cases',
+  'publications',
+  'red_flags',
+  'not_him',
+  'conflicts',
+  'open_leads',
+] as const
+
+export interface ProfileItem {
+  text: string
+  refs: string[]
+  confidence: 'high' | 'low'
+}
+
+export type Profile = Record<(typeof PROFILE_SECTIONS)[number], ProfileItem[]> & {
+  version: number
+  updated_at: string | null
+  sources: Record<string, { url: string; title: string }>
+}
+
+export const getProfile = (dossierId: string): Promise<Profile> =>
+  getJson(`/api/dossiers/${dossierId}/profile`)

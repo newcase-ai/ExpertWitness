@@ -1,6 +1,6 @@
 import pytest
 
-from app import config, llm
+from app import config, llm, profile
 from tests.fakes import FakeAdkModel
 
 ENV_NAMES = ["MODEL_API_KEY", "MODEL_NAME", "COURTLISTENER_TOKEN", "CONTACT_EMAIL", "DATABASE_PATH", "FIRECRAWL_API_KEY"]
@@ -14,6 +14,13 @@ def isolated_env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "data" / "test.db"))
     monkeypatch.setenv("MODEL_API_KEY", "test-key")
+
+
+@pytest.fixture(autouse=True)
+def no_auto_profile(monkeypatch):
+    """Every test: no automatic profile update after tool calls (one more AI call each); the
+    profile tests turn it on."""
+    monkeypatch.setattr(profile, "AUTO_UPDATE", False)
 
 
 @pytest.fixture(autouse=True)

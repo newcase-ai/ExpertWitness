@@ -20,6 +20,7 @@ from app.models import (
     Gap,
     Job,
     JobStep,
+    Profile,
     Progress,
     ResearchFindings,
     ResearchSummary,
@@ -72,6 +73,9 @@ create table if not exists blocked_sites (
 create table if not exists files (
     file_id text primary key, dossier_id text not null, source_url text not null, path text not null,
     text_path text, mime text not null, bytes integer not null, retrieved_at text not null, note_md text
+);
+create table if not exists profiles (
+    dossier_id text primary key, data text not null, version integer not null, updated_at text not null
 );
 """
 
@@ -371,6 +375,21 @@ def add_gap(dossier_id: str, step: str, reason: str) -> None:
 def findings(dossier_id: str) -> list[Finding]:
     rows = execute("select data from findings where dossier_id = ? order by position", (dossier_id,))
     return [Finding.model_validate_json(r["data"]) for r in rows]
+
+
+def get_profile(dossier_id: str) -> Profile:
+    """The run's profile; an empty one (version 0) before its first update."""
+    rows = execute("select * from profiles where dossier_id = ?", (dossier_id,))
+    if not rows:
+        return Profile(dossier_id=dossier_id)
+    row = rows[0]
+    return Profile(dossier_id=dossier_id, version=row["version"], updated_at=row["updated_at"], **json.loads(row["data"]))
+
+
+def save_profile(profile: Profile) -> None:
+    data = profile.model_dump(exclude={"dossier_id", "version", "updated_at", "sources"})
+    execute("insert or replace into profiles (dossier_id, data, version, updated_at) values (?, ?, ?, ?)",
+            (profile.dossier_id, json.dumps(data), profile.version, profile.updated_at))
 
 
 def get_research(dossier_id: str) -> ResearchFindings | None:

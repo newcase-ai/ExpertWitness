@@ -31,6 +31,11 @@ class SourceSkipped(Exception):
     """A source was not called on purpose (no token, budget used up). Shown as a gap."""
 
 
+class SourceFailed(RuntimeError):
+    """A source call failed. The message is fixed text written by code, never provider text: what
+    happened and whether calling again can help. The tool wrapper passes it to the model and the log."""
+
+
 # Public expert-witness directories. A search result on one of these is an expert signal. We only keep
 # the URL and title the search returned; these pages are never fetched by us.
 EXPERT_DIRECTORIES = (

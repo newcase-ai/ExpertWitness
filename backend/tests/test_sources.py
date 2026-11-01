@@ -6,6 +6,7 @@ import pytest
 
 from app import http, llm, store
 from app.sources import (
+    SourceFailed,
     SourceSkipped,
     courtlistener,
     given_family,
@@ -205,14 +206,47 @@ def test_courtlistener_odd_fields_do_not_crash(sources):
     assert hit["title"] == "Court opinion" and hit["snippet"] == ""
 
 
-def test_courtlistener_counts_a_sent_request_that_times_out(sources):
+def test_courtlistener_retries_a_timeout_once_and_counts_both(sources):
     def slow(request):
         raise httpx.ReadTimeout("timed out", request=request)
 
-    sources({"www.courtlistener.com": slow})
-    with pytest.raises(httpx.ReadTimeout):
+    _, seen = sources({"www.courtlistener.com": slow})
+    with pytest.raises(SourceFailed) as err:
         asyncio.run(courtlistener.search_opinions(NAME))
-    assert store.calls_since("courtlistener", 3600) == 1
+    assert str(err.value) == courtlistener.TIMED_OUT and "call the tool again" in str(err.value)
+    assert len(seen) == 2 and store.calls_since("courtlistener", 3600) == 2
+    assert seen[0].extensions["timeout"]["read"] == 60  # longer than the other sources' 20 s
+
+
+def test_courtlistener_timeout_then_answer_is_fine(sources):
+    replies = [httpx.ReadTimeout("timed out"), httpx.Response(200, json=COURTLISTENER_SEARCH)]
+
+    def flaky(request):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    _, seen = sources({"www.courtlistener.com": flaky})
+    assert len(asyncio.run(courtlistener.search_opinions(NAME))) == 2 and len(seen) == 2
+
+
+@pytest.mark.parametrize(("statuses", "requests", "says"), [
+    ((503, 200), 2, None),  # a busy server: retried once, then fine
+    ((502, 502), 2, "server error"),
+    ((429,), 1, "Wait a few minutes"),  # never retried at once
+    ((401,), 1, "token was refused"),
+    ((404,), 1, "will not help"),
+])
+def test_courtlistener_http_errors_say_what_to_do(sources, statuses, requests, says):
+    replies = [httpx.Response(s, json=COURTLISTENER_SEARCH if s == 200 else {}) for s in statuses]
+    _, seen = sources({"www.courtlistener.com": lambda request: replies.pop(0)})
+    if says is None:
+        assert len(asyncio.run(courtlistener.search_opinions(NAME))) == 2
+    else:
+        with pytest.raises(SourceFailed, match=says):
+            asyncio.run(courtlistener.search_opinions(NAME))
+    assert len(seen) == requests
 
 
 def test_courtlistener_timeout_while_waiting_for_its_slot_is_not_counted(sources, monkeypatch):

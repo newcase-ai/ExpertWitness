@@ -87,21 +87,45 @@ def test_search_hit_reads_opinion_id_not_case_id(sources):
     assert courtlistener.to_hit(result)["opinion_id"] == 701
 
 
-# --- CourtListener find_case (testimony list check) ---------------------------------------------
+# --- CourtListener RECAP dockets (court_records, court_case) -------------------------------------
 
 
-def case_result(cid, court, date, snippets):
-    return {"absolute_url": f"/opinion/{cid}/doe-v-example-co/", "caseName": "Doe v. Example Co.",
-            "court": court, "dateFiled": date, "docketNumber": f"1:{cid}-cv",
-            "opinions": [{"id": cid + 1000, "snippet": s} for s in snippets]}
+def docket_result(did, court, date, snippets, party=(), attorney=()):
+    return {"docket_absolute_url": f"/docket/{did}/doe-v-example-co/", "caseName": "Doe v. Example Co.",
+            "court": court, "dateFiled": date, "docketNumber": f"1:{did}-cv", "suitNature": "791 ERISA",
+            "party": list(party), "attorney": list(attorney),
+            "recap_documents": [{"absolute_url": f"/docket/{did}/{n}/doe-v-example-co/", "snippet": s,
+                                 "short_description": f"Exhibit {n}", "entry_date_filed": date}
+                                for n, s in enumerate(snippets, 1)]}
+
+
+def test_search_dockets_full_name_only_and_fields(sources):
+    body = {"results": [docket_result(5, "District Court, D. Example", "2021-02-08",
+                                      ["no match here", "SYNTHETIC-CL reviewed by Dr. <mark>Alex J. Rivera</mark>, "
+                                       "M.D. &amp; toxicologist " + "y" * 500], party=["Alex Rivera", "Example Co."])]}
+    _, seen = sources(routes=opinion_route(body))
+    [hit] = asyncio.run(courtlistener.search_dockets("Dr. Alex J. Rivera"))
+    params = seen[0].url.params
+    assert params["type"] == "r" and params["highlight"] == "on"
+    assert params["q"] == '"Alex J. Rivera" OR "Alex Rivera"'  # no expert-word rule, never the surname alone
+    assert hit["url"] == "https://www.courtlistener.com/docket/5/doe-v-example-co/"
+    assert (hit["case_name"], hit["court"], hit["docket_number"], hit["date_filed"], hit["nature_of_suit"]) == (
+        "Doe v. Example Co.", "District Court, D. Example", "1:5-cv", "2021-02-08", "791 ERISA")
+    assert hit["named_as"] == ["party"]
+    assert hit["documents"][1] == {"description": "Exhibit 2", "date_filed": "2021-02-08",
+                                   "url": "https://www.courtlistener.com/docket/5/2/doe-v-example-co/"}
+    [passage] = hit["passages"]  # only the snippet that highlights a match
+    assert passage.startswith("SYNTHETIC-CL reviewed by Dr. Alex J. Rivera, M.D. & toxicologist")
+    assert len(passage) == courtlistener.PASSAGE_CHARS and "<" not in passage
+    with pytest.raises(SourceSkipped):
+        asyncio.run(courtlistener.search_dockets("Dr. Rivera"))
 
 
 def test_find_case_query_and_best_match(sources):
     body = {"results": [
-        case_result(1, "District Court, N.D. Example", "2015-03-01", ["no match here"]),
-        case_result(2, "Example Court of Appeals", "2019-06-06",
-                    ["\n plain text", "SYNTHETIC-CL the plaintiff's   expert <mark>Morgan Example</mark>, "
-                     "M.D. &amp; neurologist " + "y" * 500]),
+        docket_result(1, "District Court, N.D. Example", "2015-03-01", ["no match here"]),
+        docket_result(2, "Example Court of Appeals", "2019-06-06",
+                      ["SYNTHETIC-CL the plaintiff's expert <mark>Morgan Example</mark>, M.D."]),
     ]}
     _, seen = sources(routes=opinion_route(body))
     found = asyncio.run(courtlistener.find_case('Doe v. "Example" Co.', "Dr. Morgan Q. Example",
@@ -110,23 +134,21 @@ def test_find_case_query_and_best_match(sources):
     assert q.startswith('caseName:("Doe" AND "Example") AND (')
     people = q.split(") AND (", 1)[1]
     assert '"Morgan Q. Example"' in people and '"Morgan Example"' in people and '"Example"' not in people
-    assert seen[0].url.params["type"] == "o" and seen[0].url.params["highlight"] == "on"
-    assert found["url"] == "https://www.courtlistener.com/opinion/2/doe-v-example-co/"
+    assert seen[0].url.params["type"] == "r" and seen[0].url.params["highlight"] == "on"
+    assert found["url"] == "https://www.courtlistener.com/docket/2/doe-v-example-co/"
     assert (found["case_name"], found["court"], found["date_filed"], found["docket_number"]) == (
         "Doe v. Example Co.", "Example Court of Appeals", "2019-06-06", "1:2-cv")
-    first, second = found["passages"]
-    assert first.startswith("SYNTHETIC-CL the plaintiff's expert Morgan Example, M.D. & neurologist")
-    assert len(first) == courtlistener.PASSAGE_CHARS and "<" not in first and second == "plain text"
+    assert found["passages"] == ["SYNTHETIC-CL the plaintiff's expert Morgan Example, M.D."]
     assert len(seen) == 1 and store.calls_since("courtlistener", 60) == 1  # no second call
 
 
 def test_find_case_none_skip_and_first_by_default(sources, monkeypatch):
     sources(routes=opinion_route({"results": []}))
     assert asyncio.run(courtlistener.find_case("Doe v. Example Co.", "Morgan Example")) is None
-    body = {"results": [case_result(3, "A", "2001-01-01", []), case_result(4, "B", "2002-01-01", [])]}
+    body = {"results": [docket_result(3, "A", "2001-01-01", []), docket_result(4, "B", "2002-01-01", [])]}
     sources(routes=opinion_route(body))
     found = asyncio.run(courtlistener.find_case("Roe v. Example Co.", "Morgan Example", year=1990))
-    assert found["url"].endswith("/opinion/3/doe-v-example-co/") and found["passages"] == []
+    assert found["url"].endswith("/docket/3/doe-v-example-co/") and found["passages"] == []
     _, seen = sources()
     with pytest.raises(SourceSkipped):
         asyncio.run(courtlistener.find_case("Doe v. Example Co.", "Dr. Example"))
@@ -155,14 +177,17 @@ def test_case_name_query_entities_and_fallback():
 
 
 def test_find_case_strips_highlight_tags(sources):
-    result = case_result(5, "<mark>Example</mark> Court", "2019-06-06", ["<mark>Morgan Example</mark> &amp; co"])
+    result = docket_result(5, "<mark>Example</mark> Court", "2019-06-06", ["<mark>Morgan Example</mark> &amp; co"])
     result["caseName"] = "<mark>Doe</mark> v. <mark>Example</mark> Co. &amp; Sons"
     result["docketNumber"] = "<em>1:5-cv</em>"
     sources(routes=opinion_route({"results": [result]}))
     found = asyncio.run(courtlistener.find_case("Doe v. Example Co.", "Morgan Example"))
     assert (found["case_name"], found["court"], found["docket_number"], found["passages"]) == (
         "Doe v. Example Co. & Sons", "Example Court", "1:5-cv", ["Morgan Example & co"])
-    hit = courtlistener.to_hit(result)
+    opinion = {"absolute_url": "/opinion/5/doe-v-example-co/", "caseName": result["caseName"],  # candidate search
+               "court": result["court"], "dateFiled": "2019-06-06",
+               "opinions": [{"id": 1005, "snippet": "<mark>Morgan Example</mark> &amp; co"}]}
+    hit = courtlistener.to_hit(opinion)
     assert hit["title"] == "Doe v. Example Co. & Sons" and hit["case"][1] == "Example Court"
     assert "<" not in hit["note"] + hit["snippet"]
 

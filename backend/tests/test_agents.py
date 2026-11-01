@@ -160,7 +160,7 @@ def test_grouping_failure_raises_with_all_failed_sources(sources):
     with pytest.raises(agents.FindCandidatesError, match="AI grouping step failed") as err:
         asyncio.run(agents.find_candidates(NAME, None, steps))
     assert [(f.source, f.reason) for f in err.value.failed_sources] == [
-        ("courtlistener", "CourtListener HTTP 500"),
+        ("courtlistener", courtlistener.failure(500)),
         ("group_candidates", "model returned invalid output"),
     ]
     assert steps.last("group_candidates")[1] == "failed"
