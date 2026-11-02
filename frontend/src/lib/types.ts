@@ -9,7 +9,12 @@ export interface Case {
 export type ExpertRole = 'opposing' | 'ours'
 
 export type Side = 'plaintiff' | 'defense' | 'unknown'
-export type Involvement = 'Deposition' | 'Trial testimony' | 'Mentioned'
+export type Involvement =
+  | 'Deposition'
+  | 'Trial testimony'
+  | 'Mentioned'
+  | 'Expert witness'
+  | 'Consultant or reviewer'
 
 export interface ExpertCase {
   year: number
@@ -18,6 +23,7 @@ export interface ExpertCase {
   court: string
   side: Side
   involvement: Involvement
+  url?: string // the case's CourtListener page, when it came from court records
 }
 
 export interface Fact {
