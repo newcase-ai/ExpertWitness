@@ -3,7 +3,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import agents
+from app import candidate_agent
 from app.main import app
 from app.models import Candidate, FailedSource
 
@@ -92,7 +92,7 @@ def test_candidate_search_flow(client, monkeypatch):
         seen.update(name=name, hints=hints)
         return await fake_find(name, hints, on_step)
 
-    monkeypatch.setattr(agents, "find_candidates", spy)
+    monkeypatch.setattr(candidate_agent, "find_candidates", spy)
     body = {"name": "  Alex   Rivera ", "hints": {"field": "toxicology"}}
     r = client.post("/candidate-searches", json=body)
     assert r.status_code == 202
@@ -131,7 +131,7 @@ def test_candidate_search_flow(client, monkeypatch):
 
 
 def test_failed_search(client, monkeypatch):
-    monkeypatch.setattr(agents, "find_candidates", broken_find)
+    monkeypatch.setattr(candidate_agent, "find_candidates", broken_find)
     started = client.post("/candidate-searches", json={"name": "Alex Rivera"}).json()
     job = wait_for_job(client, started["job_id"])
     assert job["status"] == "failed"

@@ -4,7 +4,7 @@ import { Download, LoaderCircle } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
 import RunResults, { ProfileView } from '@/components/run/RunResults'
 import Timeline from '@/components/run/Timeline'
-import { clock, duration, liveFindings, runStats } from '@/components/run/trace'
+import { clock, duration, liveFindings, runStats } from '@/lib/trace'
 import {
   getDossier,
   getEvents,
@@ -31,7 +31,7 @@ type Tab = (typeof TABS)[number]
 // One research run (/research/:dossierId), started by "Research this expert" or opened from the
 // searches list: what the agent does step by step (its trace), what it found, and the raw log.
 // Loading or reloading the page only reads the run; it never starts one.
-export default function ExpertResearchLive() {
+export default function ExpertResearchLivePage() {
   const navigate = useNavigate()
   const { dossierId = '' } = useParams()
   const [name, setName] = useState('Expert research')

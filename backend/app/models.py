@@ -6,7 +6,7 @@ JobStatus = Literal["queued", "running", "done", "failed"]
 StepStatus = Literal["pending", "running", "done", "failed", "skipped"]
 ActivityStatus = Literal["running", "done", "refused", "skipped", "failed"]
 EvidenceSource = Literal["openalex", "courtlistener", "web"]
-# Strongest first; candidates are ranked in this order (app/agents.py).
+# Strongest first; candidates are ranked in this order (app/candidate_agent.py).
 ExpertSignal = Literal["court_opinion_expert", "expert_directory", "web_expert_witness"]
 NO_EXPERTS_NOTICE = "No expert-witness evidence found for this name."
 NO_EXPERT_EVIDENCE_NOTE = "No expert-witness evidence found"  # on each candidate without a signal

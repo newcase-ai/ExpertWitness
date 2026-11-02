@@ -2,8 +2,11 @@
 
 Search for an expert witness, then view their research profile and ask questions about it.
 
-- `frontend/`: Vite + React + Tailwind. Profiles and the "Expert intel" chat are mock data in `src/lib/`.
+- `frontend/`: Vite + React + Tailwind. Profiles and the "Expert intel" chat are mock data in `src/lib/mocks/`.
 - `backend/`: FastAPI expert-research API (candidate search, research jobs, cited findings). See `backend/README.md`.
+  Its data (SQLite file, downloads) goes to `backend/data/`, which is gitignored.
+
+Layout, conventions and the numbered gotchas: [CLAUDE.md](CLAUDE.md).
 
 ## Run
 

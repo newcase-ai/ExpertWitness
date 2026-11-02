@@ -4,3 +4,12 @@ dist/
 __pycache__/
 .env
 .DS_Store
+
+# SQLite files and app data: they live in backend/data/ and are never committed
+backend/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3

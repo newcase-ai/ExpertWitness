@@ -15,7 +15,7 @@ import {
 } from 'lucide-react'
 import type { TraceEvent } from '@/lib/api'
 import { cn } from '@/lib/utils'
-import { buildTimeline, clock, duration, isProblem, itemText, type Item, type ToolItem } from './trace'
+import { buildTimeline, clock, duration, isProblem, itemText, type Item, type ToolItem } from '@/lib/trace'
 
 const KINDS = { model: 'Main agent', tool: 'Tools', finding: 'Results', gap: 'Gaps' } as const
 type KindFilter = keyof typeof KINDS

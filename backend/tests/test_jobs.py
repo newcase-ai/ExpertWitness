@@ -2,7 +2,7 @@ import asyncio
 
 from fastapi.testclient import TestClient
 
-from app import agents, jobs, store
+from app import candidate_agent, jobs, store
 from app.main import app
 from app.models import Candidate, FailedSource
 
@@ -23,7 +23,7 @@ def test_steps_follow_on_step_callback(monkeypatch):
         evidence = [{"source": "web", "url": "https://example.edu/x", "title": "Page"}]
         return [Candidate(display_name="Alex Rivera", summary="Synthetic.", evidence=evidence)], []
 
-    monkeypatch.setattr(agents, "find_candidates", finder)
+    monkeypatch.setattr(candidate_agent, "find_candidates", finder)
     job_id, search_id = new_search()
     asyncio.run(jobs.run_candidate_search(job_id, search_id, "Alex Rivera", None))
 
@@ -42,7 +42,7 @@ def test_finder_crash_fails_job_and_closes_steps(monkeypatch):
         on_step("courtlistener", "running")
         raise ValueError()
 
-    monkeypatch.setattr(agents, "find_candidates", finder)
+    monkeypatch.setattr(candidate_agent, "find_candidates", finder)
     job_id, search_id = new_search()
     asyncio.run(jobs.run_candidate_search(job_id, search_id, "Alex Rivera", None))
 
@@ -53,7 +53,7 @@ def test_finder_crash_fails_job_and_closes_steps(monkeypatch):
 
 
 class GroupingFailed(Exception):
-    """Stand-in for agents.FindCandidatesError: jobs.py reads its `failed_sources`."""
+    """Stand-in for candidate_agent.FindCandidatesError: jobs.py reads its `failed_sources`."""
 
     def __init__(self, message, failed_sources):
         super().__init__(message)
@@ -67,7 +67,7 @@ def test_failed_ai_step_keeps_failed_sources(monkeypatch):
         on_step("group_candidates", "running")
         raise GroupingFailed("AI grouping step failed after 1 retry", failed)
 
-    monkeypatch.setattr(agents, "find_candidates", finder)
+    monkeypatch.setattr(candidate_agent, "find_candidates", finder)
     job_id, search_id = new_search()
     asyncio.run(jobs.run_candidate_search(job_id, search_id, "Alex Rivera", None))
 
