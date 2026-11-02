@@ -249,7 +249,8 @@ def test_search_dockets_full_name_only_and_fields(sources):
                                        "M.D. &amp; toxicologist " + "y" * 500], party=["Alex Rivera", "Example Co."],
                                       more_docs=True)]}
     _, seen = sources(routes=opinion_route(body))
-    [hit] = asyncio.run(courtlistener.search_dockets("Dr. Alex J. Rivera"))
+    [hit], total, nxt = asyncio.run(courtlistener.search_dockets("Dr. Alex J. Rivera"))
+    assert (total, nxt) == (1, None)  # no count in the body: the hits on the page
     params = seen[0].url.params
     assert params["type"] == "r" and params["highlight"] == "on"
     assert params["q"] == '"Alex J. Rivera" OR "Alex Rivera"'  # no expert-word rule, never the surname alone
@@ -283,6 +284,22 @@ def test_search_dockets_words_and_case_name(sources):
     assert seen[2].url.params["q"] == '"Morgan Example"'
 
 
+def test_search_dockets_pages(sources):
+    nxt = f"{courtlistener.SEARCH}?type=r&q=x&cursor=c2"
+    replies = [{"count": 27, "next": nxt, "results": [docket_result(1, "A", "2001-01-01", [])]},
+               {"count": 27, "next": None, "results": [docket_result(2, "B", "2002-01-01", [])]}]
+    _, seen = sources(routes={"www.courtlistener.com": lambda request: httpx.Response(200, json=replies.pop(0))})
+    hits, total, link = asyncio.run(courtlistener.search_dockets("Morgan Example"))
+    assert ([h["docket_id"] for h in hits], total, link) == ([1], 27, nxt)
+    hits, total, link = asyncio.run(courtlistener.search_dockets("Morgan Example", next_url=link))
+    assert ([h["docket_id"] for h in hits], total, link) == ([2], 27, None)
+    assert seen[1].url.params["cursor"] == "c2" and seen[1].headers["Authorization"] == "Token test-token"
+    odd = {"count": 1, "next": "https://elsewhere.example/api/?cursor=x", "results": []}  # would get the token
+    sources(routes=opinion_route(odd))
+    with pytest.raises(SourceFailed, match="unexpected response"):
+        asyncio.run(courtlistener.search_dockets("Jordan Example"))  # another search: not the cached page
+
+
 def test_search_dockets_long_cv_name_uses_party_key_words(sources):
     _, seen = sources(routes=opinion_route({"results": []}))
     asyncio.run(courtlistener.search_dockets(
@@ -306,7 +323,7 @@ def test_search_dockets_strips_highlight_tags(sources):
     result["caseName"] = "<mark>Doe</mark> v. <mark>Example</mark> Co. &amp; Sons"
     result["docketNumber"] = "<em>1:5-cv</em>"
     sources(routes=opinion_route({"results": [result]}))
-    [found] = asyncio.run(courtlistener.search_dockets("Morgan Example", case_name="Doe v. Example Co."))
+    [found], _, _ = asyncio.run(courtlistener.search_dockets("Morgan Example", case_name="Doe v. Example Co."))
     assert (found["case_name"], found["court"], found["docket_number"], found["documents"][0]["passage"]) == (
         "Doe v. Example Co. & Sons", "Example Court", "1:5-cv", "Morgan Example & co")
     opinion = {"absolute_url": "/opinion/5/doe-v-example-co/", "caseName": result["caseName"],  # candidate search
@@ -384,6 +401,37 @@ def test_docket_documents_stops_at_the_last_page_and_refuses_odd_next(sources):
     sources(routes=opinion_route(odd))
     with pytest.raises(SourceFailed, match="unexpected response"):
         asyncio.run(courtlistener.docket_documents(8))
+
+
+def test_refused_token_falls_back_once(sources, monkeypatch):
+    """HTTP 401/403 with the main token: one retry with COURTLISTENER_TOKEN_FALLBACK."""
+    def route(request):
+        ok = request.headers["Authorization"] == "Token backup-token"
+        return httpx.Response(200 if ok else 401, json={"plain_text": "SYNTHETIC text"} if ok else {})
+
+    _, seen = sources(routes={"www.courtlistener.com": route})
+    with pytest.raises(SourceFailed, match="token was refused"):  # no fallback set
+        asyncio.run(courtlistener.document_text(55))
+    monkeypatch.setenv("COURTLISTENER_TOKEN_FALLBACK", "backup-token")
+    assert asyncio.run(courtlistener.document_text(56)) == "SYNTHETIC text"
+    assert [r.headers["Authorization"] for r in seen[1:]] == ["Token test-token", "Token backup-token"]
+
+
+def test_rate_limit_never_uses_the_fallback(sources, monkeypatch):
+    """Gotcha 5: one account per project; a 429 is not a reason to switch accounts."""
+    monkeypatch.setenv("COURTLISTENER_TOKEN_FALLBACK", "backup-token")
+    _, seen = sources(routes={"www.courtlistener.com": (429, {})})
+    with pytest.raises(SourceFailed, match="429"):
+        asyncio.run(courtlistener.document_text(57))
+    assert {r.headers["Authorization"] for r in seen} == {"Token test-token"}
+
+
+def test_fallback_alone_is_used_when_the_main_token_is_unset(sources, monkeypatch):
+    monkeypatch.delenv("COURTLISTENER_TOKEN")
+    monkeypatch.setenv("COURTLISTENER_TOKEN_FALLBACK", "backup-token")
+    _, seen = sources(routes=opinion_route({"plain_text": "SYNTHETIC", "ocr_status": 1}))
+    asyncio.run(courtlistener.document_text(58))
+    assert seen[0].headers["Authorization"] == "Token backup-token"
 
 
 def test_document_text(sources):

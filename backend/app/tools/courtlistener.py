@@ -1,8 +1,10 @@
-"""Tool 1: court records (CourtListener's RECAP archive of PACER dockets; DESIGN 4B.9), driven by the
-main agent (user decision 2026-11-02): it chooses what to search, which filings to read, and decides
-itself whether a case is about the expert. court_search -> cases and the filings that matched the
-name; court_filings -> all public filings of a case; court_file -> one filing downloaded with its
-text, for ask_pdf; court_verdict -> the agent's same-person decision, saved as the case's finding.
+"""Tool 1: court records (CourtListener's RECAP archive of PACER dockets; DESIGN 4B.9). The main agent
+calls court_research; its court-records helper (a sub-agent, user decision 2026-11-02) chooses what
+to search, which filings to read, and decides itself whether a case is about the expert, with four
+helper-only tools: court_search -> cases and the filings that matched the name; court_filings -> all
+public filings of a case; court_file -> one filing downloaded with its text, for ask_pdf;
+court_verdict -> the same-person decision, saved as the case's finding. court_research replies with
+what was saved plus the helper's report (cases, leads, what it searched).
 
 The search always holds the full name (gotcha 13); code drops and scores nothing. Rate limits, cache
 and the token check stay in app/sources/courtlistener.py (gotchas 5, 11, 53). Search passages go to
@@ -12,8 +14,9 @@ import asyncio
 import json
 import time
 
-from app import pdf_text, trace
+from app import llm, pdf_text, trace
 from app.evidence import copied, refuse, squash
+from app.profile import known_so_far
 from app.sources import SourceFailed, SourceSkipped, courtlistener, fold
 from app.tools import RESULT_MAX, Ctx, tool
 
@@ -33,6 +36,7 @@ TEXT_LAYER, COURTLISTENER_OCR, LOCAL_OCR = "text layer", "courtlistener ocr", "l
 TOO_LONG = f"words and case_name: at most {WORDS_MAX} characters each"
 NONE_GAP = "no federal court filings in CourtListener (RECAP) name this person"
 MORE_GAP = "court filings of {} past the first {} not listed"
+NO_SEARCH = "more=true continues a search: call court_search with these words and case_name first"
 UNKNOWN_CASE = "unknown docket_id: use one from a court_search reply"
 UNKNOWN_FILING = "unknown document_id: use one from a court_search or court_filings reply"
 NOT_AVAILABLE = "this filing is not public on CourtListener (nobody bought it from PACER): it cannot be downloaded"
@@ -83,45 +87,56 @@ def doc_number(doc: dict) -> str | None:
     return f"{n}-{doc['attachment_number']}" if n and doc.get("attachment_number") else n
 
 
-@tool(label="Court search", cap=5)
-async def court_search(ctx: Ctx, words: str = "", case_name: str = "") -> dict:
+def shown_case(hit: dict) -> dict:
+    return compact({
+        "docket_id": hit["docket_id"], "case_name": hit["case_name"], "court": hit["court"],
+        "docket_number": hit["docket_number"], "date_filed": hit["date_filed"],
+        "nature_of_suit": hit["nature_of_suit"], "named_as": hit["named_as"],
+        "filings": [compact({"document_id": d["id"], "title": title(d), "pages": d["page_count"],
+                             "available": d["available"], "passage": d["passage"][:PASSAGE_SHOWN]})
+                    for d in hit["documents"]],
+        "more_matched_filings": hit["more_filings"] or None})
+
+
+@tool(label="Court search", cap=5, main=False)
+async def court_search(ctx: Ctx, words: str = "", case_name: str = "", more: bool = False) -> dict:
     """Search federal court filings (CourtListener's RECAP archive of PACER dockets) for cases whose
-    filings, parties or lawyers name the expert in full. The full name is always searched; `words`
-    adds search words (e.g. `Medtronic`, `"motion to exclude"`, `declaration OR report`) and
-    `case_name` limits it to one case (e.g. "Doe v. Example Co."). Reply: `cases` (first 20 hits,
-    best match first), each with `docket_id`, case name, court, docket number, date filed, nature of
-    suit, `named_as` (the docket lists the expert as party or lawyer) and up to 3 `filings` that
-    matched: `document_id`, title, pages, `available` (can be downloaded) and `passage` (the search's
-    text around the name). Many people share a name: nothing is saved here. Judge each case yourself:
-    read the passages, download the filings that may be the expert's (court_file; court_filings lists
-    all of a case's filings, e.g. to find their own report) and read them with ask_pdf, then record
-    your decision with court_verdict. Federal cases only, and only filings someone bought from PACER:
-    an empty result does not mean the expert never testified. CourtListener allows 50 calls an hour."""
+    filings, parties or lawyers name the expert in full. The full name is always part of the search:
+    never put it in `words`. `words` only filters those cases (every word must appear), it never finds
+    a case the plain search does not have; `case_name` limits the search to one case (e.g. "Doe v.
+    Example Co."). Reply: `total` cases, `cases` (best match first) and `more`: true while some are not
+    shown yet; call again with the same words and case_name and more=true for the next ones. Each case
+    has `docket_id`, case name, court, docket number, date filed, nature of suit, `named_as` (the
+    docket lists the expert as party or lawyer) and up to 3 `filings` that matched: `document_id`,
+    title, pages, `available` (can be downloaded) and `passage` (the search's text around the
+    match). Many people share a name: nothing is saved here. Federal cases only, and only filings
+    someone bought from PACER: an empty result does not mean the expert never testified.
+    CourtListener allows 50 calls an hour."""
     if len(words) > WORDS_MAX or len(case_name) > CASE_NAME_MAX:
         return refuse(TOO_LONG)
-    hits = await courtlistener.search_dockets(ctx.expert.display_name, words, case_name)
-    if not hits and not words.strip() and not case_name.strip():
-        ctx.add_gap(NONE_GAP)
-    cases = []
+    key, name = (words.strip(), case_name.strip()), ctx.expert.display_name
+    search = ctx.run.searches.get(key) if more else None
+    if more and search is None:
+        return refuse(NO_SEARCH)
+    if search is None:
+        hits, total, nxt = await courtlistener.search_dockets(name, *key)
+        search = ctx.run.searches[key] = {"queue": hits, "next": nxt, "total": total}
+        if not total and key == ("", ""):
+            ctx.add_gap(NONE_GAP)
+    elif not search["queue"] and search["next"]:
+        search["queue"], _, search["next"] = await courtlistener.search_dockets(name, next_url=search["next"])
+    hits = [hit for hit in search["queue"] if hit["docket_id"] is not None]  # no id: nothing to call later
     for hit in hits:
-        if hit["docket_id"] is None:
-            continue  # no id to read its filings or record a verdict with
         ctx.run.cases[hit["docket_id"]] = hit
         remember(ctx, hit["docket_id"], hit["documents"])
-        cases.append(compact({
-            "docket_id": hit["docket_id"], "case_name": hit["case_name"], "court": hit["court"],
-            "docket_number": hit["docket_number"], "date_filed": hit["date_filed"],
-            "nature_of_suit": hit["nature_of_suit"], "named_as": hit["named_as"],
-            "filings": [compact({"document_id": d["id"], "title": title(d), "pages": d["page_count"],
-                                 "available": d["available"], "passage": d["passage"][:PASSAGE_SHOWN]})
-                        for d in hit["documents"]],
-            "more_matched_filings": hit["more_filings"] or None}))
-    shown, not_shown = fitted(cases)
-    ctx.log(f"{len(cases)} cases found" + (f", {not_shown} not shown" if not_shown else ""))
-    return {"cases": shown} | ({"not_shown": not_shown} if not_shown else {})
+    shown, _ = fitted([shown_case(hit) for hit in hits])
+    search["queue"] = hits[len(shown):]
+    left = bool(search["queue"] or search["next"])
+    ctx.log(f"{len(shown)} of {search['total']} cases shown" + (", more left" if left else ""))
+    return {"total": search["total"], "cases": shown, "more": left}
 
 
-@tool(label="Court case filings", cap=5)
+@tool(label="Court case filings", cap=5, main=False)
 async def court_filings(ctx: Ctx, docket_id: int) -> dict:
     """All public (downloadable) filings of one case from court_search, in docket order, up to 100:
     `document_id`, title, document number, date filed and pages. Use it to find the expert's own
@@ -163,7 +178,7 @@ async def read_text(ctx: Ctx, doc: dict, path) -> tuple[list[str], str, bool]:
     return pages, LOCAL_OCR, finished
 
 
-@tool(label="Court file", cap=10)
+@tool(label="Court file", cap=10, main=False)
 async def court_file(ctx: Ctx, document_id: int) -> dict:
     """Download one court filing (a `document_id` from court_search or court_filings) and save it with
     its text; scanned filings are read with OCR. Reply: `file_id` to read with ask_pdf, `pages`, and
@@ -202,7 +217,7 @@ async def court_file(ctx: Ctx, document_id: int) -> dict:
             "name_on_pages": on}
 
 
-@tool(label="Court case verdict", cap=10)
+@tool(label="Court case verdict", cap=10, main=False)
 async def court_verdict(ctx: Ctx, docket_id: int, same_person: int, role: str, why: str) -> dict:
     """Record your decision on one case from court_search: is the person named in it this expert?
     Call it for every case you looked into, also when it is someone else (the profile then lists it
@@ -244,11 +259,124 @@ async def court_verdict(ctx: Ctx, docket_id: int, same_person: int, role: str, w
     return {"ref": ref, "level": level}
 
 
-def gap_unjudged(ctx: Ctx) -> None:
-    """At the end of a run, however it ended: a gap for each case with downloaded filings but no
-    verdict, so work the agent never recorded is not lost silently."""
+def unjudged(ctx: Ctx) -> list[str]:
+    """Names of the cases with downloaded filings but no verdict."""
     judged = {f.url for f in ctx.findings("court_docket")}
     read = dict.fromkeys(d["docket_id"] for d in ctx.run.filings.values() if d.get("file_id"))
-    for case in (ctx.run.cases[n] for n in read):
-        if case["url"] not in judged:
-            ctx.add_gap(UNJUDGED_GAP.format(case["case_name"]))
+    return [case["case_name"] for case in (ctx.run.cases[n] for n in read) if case["url"] not in judged]
+
+
+def gap_unjudged(ctx: Ctx) -> None:
+    """At the end of a run, however it ended: a gap for each case read but never judged, so work
+    that was not recorded is not lost silently."""
+    for case_name in unjudged(ctx):
+        ctx.add_gap(UNJUDGED_GAP.format(case_name))
+
+
+# The court-records helper (a sub-agent run by court_research).
+HELPER_TOOLS = ["court_search", "court_filings", "court_file", "ask_pdf", "court_verdict"]
+HELPER_CALLS = 40  # model calls per court_research
+FOCUS_MAX = 500
+CONTEXT_MAX = 3_000
+RULED_OUT_SHOWN = 20
+HELPER_INSTRUCTIONS = """You are the court-records researcher for one expert witness. You search
+CourtListener (federal court filings bought from PACER) for every federal case where this expert
+appears, decide which cases are really theirs, learn what each says about them, and report back to
+the lead researcher. You get what the research knows about the expert and what the lead researcher
+asks for this time.
+
+How to work:
+1. Search. court_search already searches the expert's full name: never put the name in `words`.
+Search once with no words and read every page: while the reply says `more`, call court_search again
+with more=true. Extra words only filter the cases you already get (every word must appear), so they
+never find a new case; use one or two only when `total` is too large to read (over 100). Use
+case_name only for a case you were asked about or a filing names, and never search again for a case
+you already have. CourtListener allows 50 calls an hour for the whole app.
+2. Sort the results. Many people share a name. Compare each case with what we know: court and
+state, kind of case (nature of suit), dates, filing titles and passages, and whether the docket lists
+the person as a party or lawyer. A clearly different person (another first, middle or last name
+such as "Peter Crosby Smith", a debtor in a personal bankruptcy, a lawyer, court staff, a different
+profession) is ruled out at once with court_verdict; download nothing for it.
+3. Read the cases that may be the expert's. Filing titles naming the expert, expert reports,
+declarations, depositions, and motions or orders to exclude, limit or strike an expert are the best
+clues. Download a matched filing with court_file when it is available; when none is, list the case's
+public filings (court_filings) and pick the court's ruling on the expert or the expert's own filing.
+With ask_pdf read only the pages court_file says name the expert (name_on_pages), with one page
+before and after, never the whole file, and give the expert's details as context. Find out: is it
+the expert, their role, which side hired them, what they gave (report, declaration, deposition,
+trial testimony), fees, and how the court ruled on their testimony.
+4. Decide and record. Call court_verdict for each case as soon as you have decided: it is the only
+thing saved. Before any new search, record a verdict for every case whose filings you have read.
+5. Follow clues. When a filing names another case the expert worked on, search it with case_name.
+Co-experts, law firms, parties and employers are leads for the report, not CourtListener searches.
+Stop when every case is judged. Professional records only: never private life, family, home
+address or health.
+
+When you are done, reply with a short report for the lead researcher, in your own words (never copy
+the filings), in four parts:
+Cases: each case you judged to be the expert's: name, court, docket number, year, role and side,
+what they did, the ruling on their testimony, fees, and the file_ids worth reading further.
+Ruled out: one line on the people with the same name.
+Leads: things worth searching outside CourtListener (state cases, other forms of the name, law
+firms, parties, companies, case numbers) and why.
+Searched: what you searched and what it found, so it is not repeated."""
+
+
+def case_line(f) -> dict:
+    """A saved verdict for the court_research reply: fields copied by code from its finding."""
+    facts, match = f.facts, f.facts.get("match") or {}
+    return compact({"ref": f.finding_id, "case_name": f.title, "court": facts.get("court"),
+                    "docket_number": facts.get("docket_number"), "date_filed": facts.get("date_filed"),
+                    "level": match.get("level"), "role": match.get("role"),
+                    "why": ((match.get("reasons") or [""])[0])[:200],
+                    "file_ids": [x["file_id"] for x in facts.get("files") or []]})
+
+
+def fit_report(reply: dict) -> dict:
+    """`reply` within RESULT_MAX: the lists first (each item is saved anyway, read_profile shows them
+    all), then the report cut to the room left."""
+    for key, keep in (("ruled_out", 5), ("files", 5), ("cases", 8)):
+        if len(json.dumps(reply | {"report": ""})) <= RESULT_MAX:
+            break
+        reply[key] = reply[key][:keep]
+    while len(json.dumps(reply)) > RESULT_MAX and reply["report"]:
+        reply["report"] = reply["report"][:len(reply["report"]) * 9 // 10]
+    return reply
+
+
+@tool(label="Court research", cap=3)
+async def court_research(ctx: Ctx, focus: str = "", context: str = "") -> dict:
+    """Research the expert in federal court records (CourtListener: filings bought from PACER) with a
+    court-records helper. It searches, sorts out people with the same name, downloads and reads the
+    filings that may be the expert's, and saves each case it judges (the profile then shows them).
+    `focus`: what to look for this time; empty = every federal case naming the expert, or name cases
+    you found elsewhere (e.g. "Doe v. Example Co., D. Minn. 0:19-cv-03140"). `context`: what you know
+    that helps tell the expert from people with the same name and is not in the profile yet (e.g.
+    the CV's case list with the expert's side, employers, other forms of the name). Reply: `cases`
+    saved as the expert's (level, role, why, file_ids), `ruled_out` (same-name people), `files`
+    downloaded (file_id, title, case, pages naming the expert: read more with ask_pdf), `unjudged`
+    (cases read but not decided) and `report`: the helper's account of the cases, leads to follow
+    outside CourtListener, and what it searched. Takes a few minutes. Federal cases only: an empty
+    result does not mean the expert never testified."""
+    if len(focus) > FOCUS_MAX or len(context) > CONTEXT_MAX:
+        return refuse(f"focus: at most {FOCUS_MAX} characters, context: at most {CONTEXT_MAX}")
+    before = {f.finding_id for f in ctx.findings("court_docket")}
+    had = {n for n, d in ctx.run.filings.items() if d.get("file_id")}
+    prompt = (f"What the research knows about the expert:\n{known_so_far(ctx)}\n\n"
+              f"The lead researcher asks: {focus.strip() or 'find every federal case naming the expert'}\n"
+              f"What they know that may help: {context.strip() or 'nothing more'}")
+    try:
+        run = await ctx.sub_agent(HELPER_INSTRUCTIONS, prompt, tools=HELPER_TOOLS, max_llm_calls=HELPER_CALLS)
+        report = run.text.strip() or f"the helper stopped before its report ({run.stopped or 'no text'})"
+    except llm.ModelError as e:  # what it saved before the failure still counts
+        report = f"the helper stopped early ({e}); what it saved is listed"
+        ctx.add_gap(f"court research stopped early ({e})")
+    new = [f for f in ctx.findings("court_docket") if f.finding_id not in before]
+    theirs = [case_line(f) for f in new if (f.facts.get("match") or {}).get("level") != "ruled out"]
+    ruled_out = [f.title[:60] for f in new if (f.facts.get("match") or {}).get("level") == "ruled out"]
+    files = [{"file_id": d["file_id"], "title": title(d)[:60], "case": ctx.run.cases[d["docket_id"]]["case_name"][:60],
+              "name_on_pages": d["name_on_pages"]}
+             for n, d in ctx.run.filings.items() if d.get("file_id") and n not in had]
+    ctx.log(f"{len(theirs)} cases, {len(ruled_out)} ruled out, {len(files)} files")
+    return fit_report({"cases": theirs, "ruled_out": ruled_out[:RULED_OUT_SHOWN], "files": files,
+                       "unjudged": unjudged(ctx), "report": report})

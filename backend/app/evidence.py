@@ -78,6 +78,8 @@ class Run:
     # file_id once downloaded) the court tools showed the agent: their ids are valid in later calls.
     cases: dict[int, dict] = field(default_factory=dict)
     filings: dict[int, dict] = field(default_factory=dict)
+    # court_search paging: (words, case_name) -> {"queue": hits not shown yet, "next": link, "total": n}
+    searches: dict[tuple[str, str], dict] = field(default_factory=dict)
 
     def left(self) -> float:
         """Seconds left in the budget (0 or less: stop)."""

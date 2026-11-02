@@ -135,14 +135,33 @@ def to_hit(result: dict) -> dict:
     }
 
 
+class TokenRefused(SourceFailed):
+    """CourtListener refused the API token (HTTP 401/403): the fallback token may still work."""
+
+
 def token() -> str:
-    value = get_settings().courtlistener_token
+    settings = get_settings()
+    value = settings.courtlistener_token or settings.courtlistener_token_fallback
     if not value:
         raise SourceSkipped("COURTLISTENER_TOKEN is not set")
     return value
 
 
 async def get_json(url: str, params: dict | None, valid: Callable[[object], bool], token: str) -> dict:
+    """read_json with `token`; a refused token (HTTP 401/403) is tried once more with
+    COURTLISTENER_TOKEN_FALLBACK when set. Never after a 429: getting past the rate limit with
+    another account breaks gotcha 5 (one account per project)."""
+    try:
+        return await read_json(url, params, valid, token)
+    except TokenRefused:
+        backup = get_settings().courtlistener_token_fallback
+        if not backup or backup == token:
+            raise
+        log.warning("CourtListener refused the main token; trying the fallback token")
+        return await read_json(url, params, valid, backup)
+
+
+async def read_json(url: str, params: dict | None, valid: Callable[[object], bool], token: str) -> dict:
     """One CourtListener read with the hour/day caps, call counting and cache rules (gotcha 5).
     Only a body that passes `valid` is cached or returned. A timeout or a 502-504 is retried once;
     failures raise SourceFailed saying what happened and whether calling again can help."""
@@ -174,7 +193,7 @@ async def get_json(url: str, params: dict | None, valid: Callable[[object], bool
             log.warning("CourtListener HTTP %s; retrying once", r.status_code)
             continue
         if r.status_code != 200:
-            raise SourceFailed(failure(r.status_code))
+            raise (TokenRefused if r.status_code in (401, 403) else SourceFailed)(failure(r.status_code))
         try:
             body = r.json()
         except ValueError:
@@ -253,15 +272,26 @@ def docket_query(name: str, words: str = "", case_name: str = "") -> str:
     return " AND ".join(extra + [f"({name_query(name)})"]) if extra else name_query(name)
 
 
-async def search_dockets(name: str, words: str = "", case_name: str = "") -> list[dict]:
-    """RECAP dockets naming the person in full (in a filing, or as a party or lawyer), first page;
-    `words` and `case_name` narrow the search."""
+def is_docket_page(body: object) -> bool:
+    """A well-formed RECAP search page whose `next` link (sent with the token) stays on the API."""
+    nxt = body.get("next") if isinstance(body, dict) else None
+    return is_docket_body(body) and (nxt is None or (isinstance(nxt, str) and nxt.startswith(SEARCH + "?")))
+
+
+async def search_dockets(name: str, words: str = "", case_name: str = "",
+                         next_url: str | None = None) -> tuple[list[dict], int, str | None]:
+    """(dockets, total, next page link): one page of RECAP dockets naming the person in full (in a
+    filing, or as a party or lawyer); `words` and `case_name` narrow the search. `next_url` (from the
+    previous page) reads the next page of the same search."""
     key = token()
     if not name_variants(name):
         raise SourceSkipped("need a given and a family name; surname-only search is not used")
-    body = await get_json(SEARCH, {"type": "r", "q": docket_query(name, words, case_name), "highlight": "on"},
-                          is_docket_body, key)
-    return [to_docket(x, name) for x in body["results"][:MAX_HITS]]
+    url, params = (next_url, None) if next_url else (
+        SEARCH, {"type": "r", "q": docket_query(name, words, case_name), "highlight": "on"})
+    body = await get_json(url, params, is_docket_page, key)
+    hits = [to_docket(x, name) for x in body["results"][:MAX_HITS]]
+    total = body.get("count") if isinstance(body.get("count"), int) else len(hits)
+    return hits, total, body.get("next")
 
 
 # Opinion text (DESIGN 4.2 call 3): passages around the candidate's full name, cut by code.

@@ -10,6 +10,7 @@ import pytest
 
 from app import jobs, memory, pdf_text, store
 from app.profile import PER_KIND, finding_line, known_so_far
+from app.research_agent import first_message
 from app.sources import SourceFailed
 from app.sources import courtlistener as courtlistener_source
 from app.tools import RESULT_MAX, secret
@@ -19,6 +20,7 @@ from tests.fakes import (  # noqa: F401 - fixtures
     call,
     cl_docket,
     cl_filing,
+    cl_page,
     research_sources_fixture,
     run_tool,
     sources_fixture,
@@ -70,13 +72,13 @@ def test_search_shows_every_hit_and_saves_nothing(tool_ctx, research_sources, tm
     both go to the agent; nothing is saved, and passages reach the reply only (gotcha 15)."""
     surname = cl_filing(1, passage=f"{SNIPPET} reviewed by Dr. Rivera")
     sealed = cl_filing(2, n=5, passage="", available=False, description="Sealed exhibit")
-    calls = research_sources({"courtlistener.search_dockets": [
+    calls = research_sources({"courtlistener.search_dockets": cl_page([
         cl_docket(1, "2020-01-01", documents=[surname]), cl_docket(2, "2019-01-01", named_as=["party"], documents=[sealed]),
-        cl_docket(3, "2018-01-01") | {"docket_id": None}]})
+        cl_docket(3, "2018-01-01") | {"docket_id": None}])})
     reply = search(tool_ctx)
     assert calls[0] == ("courtlistener.search_dockets", ("Alex Rivera", "", ""), {})
     case = {"court": "District Court, N.D. Example", "nature_of_suit": "791 ERISA"}
-    assert reply == {"cases": [
+    assert reply == {"total": 3, "more": False, "cases": [
         case | {"docket_id": 1, "case_name": "Doe v. Example Co. 1", "docket_number": "1:1-cv-0001",
                 "date_filed": "2020-01-01", "filings": [{"document_id": 102, "title": "Exhibit 2, Appeal Decision Letter",
                                                          "pages": 3, "available": True,
@@ -86,7 +88,7 @@ def test_search_shows_every_hit_and_saves_nothing(tool_ctx, research_sources, tm
                 "filings": [{"document_id": 205, "title": "Sealed exhibit", "pages": 3, "available": False}]}]}
     assert tool_ctx.findings() == [] and gaps(tool_ctx) == []
     assert set(tool_ctx.run.cases) == {1, 2} and tool_ctx.run.filings[205]["docket_id"] == 2
-    assert rows(tool_ctx) == [("court_search", "done", "2 cases found")]
+    assert rows(tool_ctx) == [("court_search", "done", "2 of 3 cases shown")]
     assert SNIPPET not in stored(tool_ctx, tmp_path)
 
 
@@ -99,23 +101,43 @@ def test_search_words_and_case_name(tool_ctx, research_sources):
 
 
 def test_no_cases_is_a_gap_for_the_plain_search_only(tool_ctx, research_sources):
-    research_sources({"courtlistener.search_dockets": []})
-    assert search(tool_ctx, words="Medtronic") == {"cases": []} and gaps(tool_ctx) == []
-    assert search(tool_ctx) == {"cases": []}
+    research_sources({"courtlistener.search_dockets": cl_page([])})
+    empty = {"total": 0, "cases": [], "more": False}
+    assert search(tool_ctx, words="Medtronic") == empty and gaps(tool_ctx) == []
+    assert search(tool_ctx) == empty
     assert gaps(tool_ctx) == [("court_search", court.NONE_GAP)]
 
 
-def test_search_reply_fits(tool_ctx, research_sources):
-    """20 cases x 3 long filings: the reply stays under RESULT_MAX (a longer one is dropped whole,
-    gotcha 59); every case is remembered, the rest counted."""
+def test_search_reply_fits_and_more_shows_the_rest(tool_ctx, research_sources):
+    """20 cases x 3 long filings: a reply stays under RESULT_MAX (a longer one is dropped whole,
+    gotcha 59); more=true shows the rest of the page without a new CourtListener call."""
     def docs(did):
         return [cl_filing(did, n, passage="Alex Rivera " + "x" * 400, description="y" * 200) for n in (1, 2, 3)]
 
-    research_sources({"courtlistener.search_dockets": [cl_docket(d, "2021-01-01", documents=docs(d))
-                                                       | {"case_name": "z" * 200} for d in range(1, 21)]})
-    reply = search(tool_ctx)
-    assert len(json.dumps(reply)) <= RESULT_MAX and reply["not_shown"] > 0
-    assert len(reply["cases"]) + reply["not_shown"] == 20 and len(tool_ctx.run.cases) == 20
+    calls = research_sources({"courtlistener.search_dockets": cl_page(
+        [cl_docket(d, "2021-01-01", documents=docs(d)) | {"case_name": "z" * 200} for d in range(1, 21)])})
+    shown = []
+    for n in range(5):
+        reply = search(tool_ctx, more=n > 0)
+        assert len(json.dumps(reply)) <= RESULT_MAX and reply["total"] == 20
+        shown += [c["docket_id"] for c in reply["cases"]]
+        if not reply["more"]:
+            break
+    assert shown == list(range(1, 21)) and len(calls) == 1
+
+
+def test_more_reads_the_next_page(tool_ctx, research_sources):
+    pages = {None: cl_page([cl_docket(1, "2021-01-01")], total=2, next_url="NEXT"),
+             "NEXT": cl_page([cl_docket(2, "2020-01-01")], total=2)}
+    calls = research_sources({"courtlistener.search_dockets": lambda *a, next_url=None: pages[next_url]})
+    assert search(tool_ctx, more=True) == {"error": court.NO_SEARCH}  # nothing to continue yet
+    first = search(tool_ctx)
+    assert ([c["docket_id"] for c in first["cases"]], first["more"]) == ([1], True)
+    second = search(tool_ctx, more=True)
+    assert (second["total"], [c["docket_id"] for c in second["cases"]], second["more"]) == (2, [2], False)
+    assert calls[-1] == ("courtlistener.search_dockets", ("Alex Rivera",), {"next_url": "NEXT"})
+    assert search(tool_ctx, more=True) == {"total": 2, "cases": [], "more": False}
+    assert set(tool_ctx.run.cases) == {1, 2}
 
 
 def test_source_failure_tells_the_agent_what_happened(tool_ctx, research_sources):
@@ -180,7 +202,7 @@ def world_fixture(research_sources, monkeypatch):
             return len(files[filepath_local])
 
         monkeypatch.setattr(pdf_text, "ocr_pages", lambda path, stop_at=None: (ocr or [], ocr_finished))
-        research_sources({"courtlistener.search_dockets": [cl_docket(11, "2021-05-01", documents=docs)],
+        research_sources({"courtlistener.search_dockets": cl_page([cl_docket(11, "2021-05-01", documents=docs)]),
                           "courtlistener.download_document": download,
                           "courtlistener.document_text": lambda doc_id: (cl_text or {}).get(doc_id, "")})
         return downloads
@@ -274,8 +296,8 @@ def test_verdict_levels(tool_ctx, research_sources, score, level, confidence, no
 
 def test_verdict_refusals_save_nothing(tool_ctx, research_sources, tmp_path):
     passage = f"{SNIPPET} the claim was reviewed by Dr. Alex J. Rivera, a toxicologist"
-    research_sources({"courtlistener.search_dockets": [cl_docket(11, "2021-05-01",
-                                                                 documents=[cl_filing(11, passage=passage)])]})
+    research_sources({"courtlistener.search_dockets": cl_page([cl_docket(11, "2021-05-01",
+                                                                 documents=[cl_filing(11, passage=passage)])])})
     assert verdict(tool_ctx) == {"error": court.UNKNOWN_CASE}  # no search yet
     search(tool_ctx)
     assert verdict(tool_ctx, role="witness") == {"error": court.BAD_ROLE}
@@ -294,33 +316,109 @@ def test_one_verdict_per_case(tool_ctx, research_sources):
     assert len(tool_ctx.findings()) == 1
 
 
-def test_court_tools_run_through_the_main_agent(tool_ctx, research_sources, adk_model):
+# --- court_research: the court-records helper ------------------------------------------------------
+
+
+def research(ctx, adk_model, script, **args):
+    """court_research through the wrapper; `script` is the helper agent's turns."""
+    adk_model.script = script
+    return asyncio.run(run_tool(ctx, "court_research", **args))
+
+
+def test_court_research_runs_the_helper_and_reports_what_it_saved(tool_ctx, world, adk_model):
+    world({"recap/synthetic.11.2.pdf": pdf(OTHER, OWN)})
+    reply = research(tool_ctx, adk_model, [
+        call("court_search", case_name="Doe v. Example Co."), call("court_file", document_id=1102),
+        call("court_verdict", docket_id=11, same_person=85, role="expert witness", why=WHY),
+        "SYNTHETIC report: Cases: Doe v. Example Co. 11. Leads: none."],
+        focus="Doe v. Example Co.", context="SYNTHETIC CV: plaintiff's expert in Doe v. Example Co.")
+    [helper] = adk_model.seen[:1]
+    assert set(helper.tools_dict) == set(court.HELPER_TOOLS)
+    prompt = helper.contents[0].parts[0].text
+    assert "Name: Alex Rivera" in prompt and "The lead researcher asks: Doe v. Example Co." in prompt
+    assert "What they know that may help: SYNTHETIC CV: plaintiff's expert" in prompt
+    [found] = tool_ctx.findings()
+    file_id = found.facts["files"][0]["file_id"]
+    assert reply == {
+        "cases": [{"ref": found.finding_id, "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example",
+                   "docket_number": "1:11-cv-0001", "date_filed": "2021-05-01", "level": "high",
+                   "role": "expert witness", "why": WHY, "file_ids": [file_id]}],
+        "ruled_out": [], "unjudged": [], "report": "SYNTHETIC report: Cases: Doe v. Example Co. 11. Leads: none.",
+        "files": [{"file_id": file_id, "title": "Exhibit 2, Appeal Decision Letter", "case": "Doe v. Example Co. 11",
+                   "name_on_pages": [2]}]}
+    assert [r[0] for r in rows(tool_ctx)] == ["court_research", "court_search", "court_file", "court_verdict"]
+    assert rows(tool_ctx)[0] == ("court_research", "done", "1 cases, 0 ruled out, 1 files")
+
+
+def test_court_research_lists_people_ruled_out(tool_ctx, research_sources, adk_model):
     research_sources()
-    adk_model.script = [call("court_search", words="toxicology"),
-                        call("court_verdict", docket_id=11, same_person=80, role="expert witness", why=WHY), "DONE"]
-    asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
-    job = store.get_job(tool_ctx.job_id)
-    assert job.status == "done"
-    assert [(a.tool, a.label, a.status) for a in job.activity] == [
-        ("court_search", "Court search", "done"), ("court_verdict", "Court case verdict", "done")]
-    assert [f.kind for f in tool_ctx.findings()] == ["court_docket"]
-    assert {"court_filings", "court_file"} <= set(adk_model.seen[0].tools_dict)
-    assert gaps(tool_ctx) == []  # searched, nothing downloaded: no unjudged case
+    reply = research(tool_ctx, adk_model, [
+        call("court_search"), call("court_verdict", docket_id=12, same_person=5, role="party", why="SYNTHETIC debtor"),
+        "SYNTHETIC report"])
+    assert (reply["cases"], reply["ruled_out"]) == ([], ["Doe v. Example Co. 12"])
+    assert "find every federal case naming the expert" in adk_model.seen[0].contents[0].parts[0].text
 
 
-def test_a_case_read_but_not_judged_is_a_gap_however_the_run_ends(tool_ctx, world, adk_model):
-    """The run stops (here a model error) after a filing was downloaded and before any verdict."""
+def test_court_research_stopped_early_keeps_what_was_saved(tool_ctx, world, adk_model):
     world({"recap/synthetic.11.2.pdf": pdf(OWN)})
-    adk_model.script = [call("court_search"), call("court_file", document_id=1102), RuntimeError("SYNTHETIC down")]
+    reply = research(tool_ctx, adk_model, [call("court_search"), call("court_file", document_id=1102),
+                                           RuntimeError("SYNTHETIC down")])
+    assert reply["unjudged"] == ["Doe v. Example Co. 11"] and reply["files"][0]["case"] == "Doe v. Example Co. 11"
+    assert reply["report"] == "the helper stopped early (model call failed (RuntimeError)); what it saved is listed"
+    assert gaps(tool_ctx) == [("court_research", "court research stopped early (model call failed (RuntimeError))")]
+
+
+def test_court_research_refuses_long_arguments(tool_ctx, adk_model):
+    assert research(tool_ctx, adk_model, [], focus="x" * (court.FOCUS_MAX + 1))["error"].startswith("focus: at most")
+    assert adk_model.seen == []
+
+
+def test_one_profile_update_for_everything_the_helper_saved(tool_ctx, research_sources, adk_model, monkeypatch):
+    """The helper's own tool calls do not update the profile; court_research's call does, once."""
+    from app import profile
+    updates = []
+
+    async def update(dossier_id, expert, new, known):
+        updates.append([f.kind for f in new])
+        return store.get_profile(dossier_id)
+
+    monkeypatch.setattr(profile, "AUTO_UPDATE", True)
+    monkeypatch.setattr(profile, "update", update)
+    research_sources()
+    research(tool_ctx, adk_model, [
+        call("court_search"), call("court_verdict", docket_id=11, same_person=85, role="expert witness", why=WHY),
+        call("court_verdict", docket_id=12, same_person=5, role="party", why="SYNTHETIC debtor"), "SYNTHETIC report"])
+    assert updates == [["court_docket", "court_docket"]]
+
+
+def test_court_research_reply_fits():
+    reply = court.fit_report({"cases": [{"case_name": "x" * 200, "why": "y" * 200}] * 30,
+                              "ruled_out": ["z" * 60] * 20, "files": [{"title": "t" * 60}] * 30, "unjudged": [],
+                              "report": "SYNTHETIC report " * 1000})
+    assert len(json.dumps(reply)) <= RESULT_MAX and len(reply["cases"]) == 8 and reply["report"]
+
+
+def test_main_agent_gets_court_research_not_the_helper_tools(tool_ctx, world, adk_model):
+    """Through a real job: the main agent sees court_research only; a case the helper read but never
+    judged is a gap at the end of the run, a judged one is not."""
+    world({"recap/synthetic.11.2.pdf": pdf(OWN)})
+    adk_model.script = [call("court_research"), call("court_search"), call("court_file", document_id=1102),
+                        "SYNTHETIC report", "DONE"]
     asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
+    main = set(adk_model.seen[0].tools_dict)
+    assert "court_research" in main and "ask_pdf" in main and not main & {"court_search", "court_filings",
+                                                                          "court_file", "court_verdict"}
+    assert "court_search" not in first_message(EXPERT, None) and "- court_research: Court research" in \
+        first_message(EXPERT, None)
+    assert store.get_job(tool_ctx.job_id).status == "done"
     assert ("main_agent", court.UNJUDGED_GAP.format("Doe v. Example Co. 11")) in gaps(tool_ctx)
-    assert tool_ctx.findings() == []
 
 
 def test_a_judged_case_is_no_gap(tool_ctx, world, adk_model):
     world({"recap/synthetic.11.2.pdf": pdf(OWN)})
-    adk_model.script = [call("court_search"), call("court_file", document_id=1102),
-                        call("court_verdict", docket_id=11, same_person=5, role="party", why=WHY), "DONE"]
+    adk_model.script = [call("court_research"), call("court_search"), call("court_file", document_id=1102),
+                        call("court_verdict", docket_id=11, same_person=5, role="party", why=WHY),
+                        "SYNTHETIC report", "DONE"]
     asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
     assert gaps(tool_ctx) == [] and [f.kind for f in tool_ctx.findings()] == ["court_docket"]
 
