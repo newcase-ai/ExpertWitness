@@ -1,21 +1,24 @@
-"""Tool 1: court records (DESIGN 4B.9): federal dockets (RECAP) with fake CourtListener functions and a
-fake AI same-person check. Synthetic people only."""
+"""Tool 1: court records (DESIGN 4B.9): court_search, court_filings, court_file and court_verdict with
+fake CourtListener functions and fake PDF text (a "PDF" here is synthetic page texts joined by form
+feeds). Synthetic people only (gotcha 8)."""
 
 import asyncio
 import json
+from pathlib import Path
 
-from app import jobs, llm, store
-from app.evidence import LIMIT_REACHED, TOOL_FAILED
-from app.models import Evidence
-from app.profile import PER_KIND, known_so_far
+import pytest
+
+from app import jobs, memory, pdf_text, store
+from app.profile import PER_KIND, finding_line, known_so_far
 from app.sources import SourceFailed
 from app.sources import courtlistener as courtlistener_source
-from app.tools import RESULT_MAX
-from app.tools.courtlistener import AI_LOW_NOTE, LOW_NOTE, NONE_GAP, court_in_state
+from app.tools import RESULT_MAX, secret
+from app.tools import courtlistener as court
 from tests.fakes import (  # noqa: F401 - fixtures
     EXPERT,
     call,
     cl_docket,
+    cl_filing,
     research_sources_fixture,
     run_tool,
     sources_fixture,
@@ -23,24 +26,9 @@ from tests.fakes import (  # noqa: F401 - fixtures
 )
 
 SNIPPET = "SYNTHETIC-CL-SNIPPET"  # marker: search passages must never reach the database
-FULL = f"{SNIPPET} the claim was reviewed by Dr. Alex J. Rivera, a toxicologist"  # full name + field word
-SURNAME = f"{SNIPPET} the claim was reviewed by Dr. Rivera, a toxicologist"
-NO_FIELD = f"{SNIPPET} a letter from Alex Rivera was filed"
-AI_DOWN = llm.ModelError("model call failed (RuntimeError)")
-AI_DOWN_GAP = ("court_records", "AI same-person check failed (model call failed (RuntimeError)); code score used")
-
-
-def ai(*verdicts):
-    """A fake call_model for the same-person check: (score, role, reason) for C1, C2, ...; the
-    prompts it got are in `.prompts`."""
-
-    def reply(instructions, input, schema=None, web_search=False, output_type=None):
-        reply.prompts.append(input)
-        return llm.ModelResult(data={"cases": [{"id": f"C{i}", "same_person": s, "role": r, "reason": why}
-                                               for i, (s, r, why) in enumerate(verdicts, 1)]})
-
-    reply.prompts = []
-    return reply
+OWN = "Alex J. Rivera, PhD. My opinions in this matter are as follows."
+OTHER = "The court sets the schedule. Counsel shall appear."
+WHY = "SYNTHETIC same specialty and kind of case"
 
 
 def rows(ctx):
@@ -57,65 +45,269 @@ def stored(ctx, tmp_path) -> str:
                                                                          store.activity(ctx.job_id)])
 
 
-def test_ai_keeps_the_same_person_and_skips_a_namesake(tool_ctx, research_sources, tmp_path):
-    """The AI compares each case with what we know so far; a namesake (score < 25) is not kept."""
-    tool_ctx.add_finding("web_testimony", "SYNTHETIC expert profile", "https://example.org/rivera",
-                         facts={"facts": ["SYNTHETIC: reviews disability claims"]})
-    check = ai((85, "consultant or reviewer", "SYNTHETIC same field and kind of case"),
-               (10, "party", "SYNTHETIC a police officer, not a toxicologist"))
-    research_sources({"courtlistener.search_dockets": [cl_docket(12, "2018-01-02", passage=FULL),
-                                                       cl_docket(11, "2021-05-01", passage=FULL),
-                                                       cl_docket(11, "2021-05-01", passage=FULL)],
-                      "llm.call_model": check})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    [prompt] = check.prompts  # one AI call for all cases
-    assert "Field: toxicology" in prompt and "Location: Ohio, US" in prompt
-    assert "- web_testimony: SYNTHETIC expert profile; SYNTHETIC: reviews disability claims" in prompt
-    assert "C1: Doe v. Example Co. 11 | District Court, N.D. Example | filed 2021-05-01" in prompt
-    assert "- docket 1:11-cv-0001; nature of suit: 791 ERISA" in prompt
-    assert f"- Exhibit 2, Appeal Decision Letter: {FULL}" in prompt and "C2: Doe v. Example Co. 12" in prompt
-    [found] = tool_ctx.findings("court_docket")
-    url = "https://www.courtlistener.com/docket/11/doe-v-example/"
-    assert (found.url, found.collector, found.source_type, found.confidence, found.note) == (
-        url, "court_records", "courtlistener_docket", "high", None)
-    assert found.facts == {
-        "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example",
-        "docket_number": "1:11-cv-0001", "date_filed": "2021-05-01", "nature_of_suit": "791 ERISA", "named_as": [],
-        "documents": [{"description": "Exhibit 2, Appeal Decision Letter", "date_filed": "2021-05-01",
-                       "url": "https://www.courtlistener.com/docket/11/12/2/doe-v-example/"}],
-        "match": {"score": 85, "level": "high", "role": "consultant or reviewer",
-                  "reasons": ["SYNTHETIC same field and kind of case"], "checked_by": "ai",
-                  "context": "no profile yet, 1 findings"}}
-    assert reply == {"skipped_same_name": 1, "files": [], "cases": [
-        {"ref": found.finding_id, "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example",
-         "docket_number": "1:11-cv-0001", "date_filed": "2021-05-01", "score": 85, "level": "high",
-         "role": "consultant or reviewer", "why": "SYNTHETIC same field and kind of case", "passage": FULL}]}
-    assert len(json.dumps(reply)) <= RESULT_MAX
-    assert rows(tool_ctx) == [("court_records", "done", ("3 cases found, 1 kept, 1 same-name skipped"
-                                                         " · checked against no profile yet, 1 findings"))]
-    assert gaps(tool_ctx) == [("court_records", "1 same-name court cases skipped: not tied to this person")]
-    assert SNIPPET not in stored(tool_ctx, tmp_path)  # gotcha 15: passages go to the AI and the reply only
+def search(ctx, **args):
+    return asyncio.run(run_tool(ctx, "court_search", **args))
 
 
-def test_ai_unsure_is_kept_low_with_a_verify_note(tool_ctx, research_sources):
-    research_sources({"courtlistener.search_dockets": [cl_docket(1, "2020-01-01", passage=NO_FIELD)],
-                      "llm.call_model": ai((30, "unclear", "SYNTHETIC nothing ties it to the expert"))})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
+def get_file(ctx, document_id):
+    return asyncio.run(run_tool(ctx, "court_file", document_id=document_id))
+
+
+def verdict(ctx, docket_id=11, same_person=85, role="expert witness", why=WHY):
+    return asyncio.run(run_tool(ctx, "court_verdict", docket_id=docket_id, same_person=same_person, role=role,
+                                why=why))
+
+
+def pdf(*pages: str) -> bytes:
+    return b"%PDF-" + "\f".join(pages).encode()
+
+
+# --- court_search ---------------------------------------------------------------------------------
+
+
+def test_search_shows_every_hit_and_saves_nothing(tool_ctx, research_sources, tmp_path):
+    """No code drop or score (user, 2026-11-02): a surname-only passage and a case with no passage
+    both go to the agent; nothing is saved, and passages reach the reply only (gotcha 15)."""
+    surname = cl_filing(1, passage=f"{SNIPPET} reviewed by Dr. Rivera")
+    sealed = cl_filing(2, n=5, passage="", available=False, description="Sealed exhibit")
+    calls = research_sources({"courtlistener.search_dockets": [
+        cl_docket(1, "2020-01-01", documents=[surname]), cl_docket(2, "2019-01-01", named_as=["party"], documents=[sealed]),
+        cl_docket(3, "2018-01-01") | {"docket_id": None}]})
+    reply = search(tool_ctx)
+    assert calls[0] == ("courtlistener.search_dockets", ("Alex Rivera", "", ""), {})
+    case = {"court": "District Court, N.D. Example", "nature_of_suit": "791 ERISA"}
+    assert reply == {"cases": [
+        case | {"docket_id": 1, "case_name": "Doe v. Example Co. 1", "docket_number": "1:1-cv-0001",
+                "date_filed": "2020-01-01", "filings": [{"document_id": 102, "title": "Exhibit 2, Appeal Decision Letter",
+                                                         "pages": 3, "available": True,
+                                                         "passage": f"{SNIPPET} reviewed by Dr. Rivera"}]},
+        case | {"docket_id": 2, "case_name": "Doe v. Example Co. 2", "docket_number": "1:2-cv-0001",
+                "date_filed": "2019-01-01", "named_as": ["party"],
+                "filings": [{"document_id": 205, "title": "Sealed exhibit", "pages": 3, "available": False}]}]}
+    assert tool_ctx.findings() == [] and gaps(tool_ctx) == []
+    assert set(tool_ctx.run.cases) == {1, 2} and tool_ctx.run.filings[205]["docket_id"] == 2
+    assert rows(tool_ctx) == [("court_search", "done", "2 cases found")]
+    assert SNIPPET not in stored(tool_ctx, tmp_path)
+
+
+def test_search_words_and_case_name(tool_ctx, research_sources):
+    calls = research_sources()
+    search(tool_ctx, words='"motion to exclude"', case_name="Doe v. Example Co.")
+    assert calls[-1] == ("courtlistener.search_dockets", ("Alex Rivera", '"motion to exclude"', "Doe v. Example Co."), {})
+    assert search(tool_ctx, words="x" * (court.WORDS_MAX + 1)) == {"error": court.TOO_LONG}
+    assert search(tool_ctx, case_name="x" * (court.CASE_NAME_MAX + 1)) == {"error": court.TOO_LONG}
+
+
+def test_no_cases_is_a_gap_for_the_plain_search_only(tool_ctx, research_sources):
+    research_sources({"courtlistener.search_dockets": []})
+    assert search(tool_ctx, words="Medtronic") == {"cases": []} and gaps(tool_ctx) == []
+    assert search(tool_ctx) == {"cases": []}
+    assert gaps(tool_ctx) == [("court_search", court.NONE_GAP)]
+
+
+def test_search_reply_fits(tool_ctx, research_sources):
+    """20 cases x 3 long filings: the reply stays under RESULT_MAX (a longer one is dropped whole,
+    gotcha 59); every case is remembered, the rest counted."""
+    def docs(did):
+        return [cl_filing(did, n, passage="Alex Rivera " + "x" * 400, description="y" * 200) for n in (1, 2, 3)]
+
+    research_sources({"courtlistener.search_dockets": [cl_docket(d, "2021-01-01", documents=docs(d))
+                                                       | {"case_name": "z" * 200} for d in range(1, 21)]})
+    reply = search(tool_ctx)
+    assert len(json.dumps(reply)) <= RESULT_MAX and reply["not_shown"] > 0
+    assert len(reply["cases"]) + reply["not_shown"] == 20 and len(tool_ctx.run.cases) == 20
+
+
+def test_source_failure_tells_the_agent_what_happened(tool_ctx, research_sources):
+    research_sources({"courtlistener.search_dockets": SourceFailed(courtlistener_source.TIMED_OUT)})
+    assert search(tool_ctx) == {"error": f"source call failed: {courtlistener_source.TIMED_OUT}"}
+    assert rows(tool_ctx) == [("court_search", "failed", courtlistener_source.TIMED_OUT)]
+    assert gaps(tool_ctx) == [("court_search", f"Court search failed: {courtlistener_source.TIMED_OUT}")]
+
+
+def test_no_token_is_skipped(tool_ctx, sources, monkeypatch):
+    """Gotcha 11: the real source refuses before any request (fake HTTP routes installed anyway)."""
+    _, seen = sources()
+    monkeypatch.delenv("COURTLISTENER_TOKEN")
+    assert search(tool_ctx) == {"error": "source not available: COURTLISTENER_TOKEN is not set"}
+    assert rows(tool_ctx) == [("court_search", "skipped", "COURTLISTENER_TOKEN is not set")] and seen == []
+
+
+# --- court_filings --------------------------------------------------------------------------------
+
+
+def test_court_filings_lists_a_known_case(tool_ctx, research_sources):
+    docs = [{k: v for k, v in cl_filing(11, n, description=f"Filing {n}").items() if k != "passage"}
+            | {"attachment_number": 1 if n == 3 else None} for n in (1, 3)]
+    calls = research_sources({"courtlistener.docket_documents": (docs, True)})
+    assert asyncio.run(run_tool(tool_ctx, "court_filings", docket_id=11)) == {"error": court.UNKNOWN_CASE}
+    search(tool_ctx)
+    reply = asyncio.run(run_tool(tool_ctx, "court_filings", docket_id=11))
+    assert reply == {"docket_id": 11, "more_not_listed": True, "filings": [
+        {"document_id": 1101, "title": "Filing 1", "number": "1", "date_filed": "2021-05-01", "pages": 3},
+        {"document_id": 1103, "title": "Filing 3", "number": "3-1", "date_filed": "2021-05-01", "pages": 3}]}
+    assert ("courtlistener.docket_documents", (11,), {}) in calls
+    assert gaps(tool_ctx) == [("court_filings", "court filings of Doe v. Example Co. 11 past the first 2 not listed")]
+    assert tool_ctx.run.filings[1103]["docket_id"] == 11 and tool_ctx.run.filings[1102]["passage"]
+
+
+# --- court_file -----------------------------------------------------------------------------------
+
+
+@pytest.fixture(name="world")
+def world_fixture(research_sources, monkeypatch):
+    """setup(files, ...) installs fake PDF text, downloads (a missing file: storage down) and OCR,
+    and a search hit for docket 11 with `docs`; returns the downloaded paths."""
+
+    def page_texts(path):
+        data = Path(path).read_bytes()
+        if not data.startswith(b"%PDF-"):
+            raise pdf_text.PdfUnreadable(pdf_text.UNREADABLE)
+        return data[5:].decode().split("\f")
+
+    monkeypatch.setattr(pdf_text, "page_texts", page_texts)
+    monkeypatch.setattr(pdf_text, "mostly_empty", lambda pages: sum(not p.strip() for p in pages) * 2 > len(pages))
+    monkeypatch.setattr(pdf_text, "split_text", lambda text: text.split("\f"))
+
+    def setup(files, cl_text=None, ocr=None, ocr_finished=True, docs=None):
+        downloads = []
+
+        def download(filepath_local, dest):
+            if filepath_local not in files:
+                raise SourceFailed("SYNTHETIC storage down")
+            downloads.append(filepath_local)
+            Path(dest).write_bytes(files[filepath_local])
+            return len(files[filepath_local])
+
+        monkeypatch.setattr(pdf_text, "ocr_pages", lambda path, stop_at=None: (ocr or [], ocr_finished))
+        research_sources({"courtlistener.search_dockets": [cl_docket(11, "2021-05-01", documents=docs)],
+                          "courtlistener.download_document": download,
+                          "courtlistener.document_text": lambda doc_id: (cl_text or {}).get(doc_id, "")})
+        return downloads
+
+    return setup
+
+
+def test_court_file_downloads_and_saves_the_text(tool_ctx, world, tmp_path):
+    data = pdf(OTHER, OWN, "Rivera, Alex testified")
+    downloads = world({"recap/synthetic.11.2.pdf": data})
+    search(tool_ctx)
+    reply = get_file(tool_ctx, 1102)
+    file_id = reply["file_id"]
+    assert reply == {"file_id": file_id, "title": "Exhibit 2, Appeal Decision Letter", "pages": 3,
+                     "text_source": "text layer", "name_on_pages": [2, 3]}
+    row = memory.file(file_id)
+    path = Path(row["path"])
+    assert path.parent == tmp_path / "data" / "files" / tool_ctx.dossier_id and path.read_bytes() == data
+    assert row["source_url"] == "https://www.courtlistener.com/docket/11/2/doe-v-example/"
+    assert Path(row["text_path"]).read_text() == f"[Page 1]\n{OTHER}\n[Page 2]\n{OWN}\n[Page 3]\nRivera, Alex testified"
+    assert tool_ctx.findings() == []  # the verdict saves the case, not the download
+    assert list((path.parent / "tmp").iterdir()) == []
+    again = get_file(tool_ctx, 1102)
+    assert again["file_id"] == file_id and again["already_downloaded"] and downloads == ["recap/synthetic.11.2.pdf"]
+    assert rows(tool_ctx)[1:] == [("court_file", "done", "3 pages, text layer, name on 2 pages"),
+                                  ("court_file", "done", "already downloaded")]
+
+
+def test_court_file_scans_use_courtlistener_ocr_then_local_ocr(tool_ctx, world):
+    world({"recap/synthetic.11.1.pdf": pdf("", ""), "recap/synthetic.11.2.pdf": pdf("", "")},
+          cl_text={1101: f"{OWN}\f{OTHER}"}, ocr=[OTHER, OWN], docs=[cl_filing(11, 1), cl_filing(11, 2)])
+    search(tool_ctx)
+    first, second = get_file(tool_ctx, 1101), get_file(tool_ctx, 1102)
+    assert (first["text_source"], first["name_on_pages"]) == (court.COURTLISTENER_OCR, [1])
+    assert (second["text_source"], second["name_on_pages"]) == (court.LOCAL_OCR, [2])
+
+
+def test_court_file_refusals_keep_no_file(tool_ctx, world, tmp_path):
+    world({"recap/synthetic.11.1.pdf": b"<html>SYNTHETIC</html>", "recap/synthetic.11.3.pdf": pdf("", "")},
+          docs=[cl_filing(11, 1), cl_filing(11, 2, available=False), cl_filing(11, 3), cl_filing(11, 4)])
+    search(tool_ctx)
+    assert get_file(tool_ctx, 999) == {"error": court.UNKNOWN_FILING}
+    assert get_file(tool_ctx, 1101) == {"error": pdf_text.UNREADABLE}
+    assert get_file(tool_ctx, 1102) == {"error": court.NOT_AVAILABLE}
+    assert get_file(tool_ctx, 1103) == {"error": court.NO_TEXT}  # a scan, no OCR text anywhere
+    assert get_file(tool_ctx, 1104) == {"error": "source call failed: SYNTHETIC storage down"}
+    assert memory.files(tool_ctx.dossier_id) == []
+    assert list((tmp_path / "data" / "files" / tool_ctx.dossier_id / "tmp").iterdir()) == []
+
+
+def test_court_file_ocr_stopped_by_the_time_limit(tool_ctx, world):
+    world({"recap/synthetic.11.2.pdf": pdf("", "")}, ocr=["SYNTHETIC first page"], ocr_finished=False)
+    search(tool_ctx)
+    assert get_file(tool_ctx, 1102) == {"error": court.OCR_TIME}
+    assert memory.files(tool_ctx.dossier_id) == []
+
+
+# --- court_verdict --------------------------------------------------------------------------------
+
+
+def test_verdict_saves_the_case_with_the_files_read(tool_ctx, world):
+    world({"recap/synthetic.11.2.pdf": pdf(OWN)})
+    search(tool_ctx)
+    file_id = get_file(tool_ctx, 1102)["file_id"]
+    assert verdict(tool_ctx, why=f"SYNTHETIC: {OWN}") == {"error": court.COPIED_WHY}  # copies the filing
+    reply = verdict(tool_ctx)
     [found] = tool_ctx.findings()
-    assert (found.confidence, found.note, found.facts["match"]["level"]) == ("low", AI_LOW_NOTE, "low")
-    assert (reply["cases"][0]["role"], reply["skipped_same_name"]) == ("unclear", 0)
+    assert reply == {"ref": found.finding_id, "level": "high"}
+    assert (found.kind, found.title, found.url, found.collector, found.source_type, found.confidence, found.note) == (
+        "court_docket", "Doe v. Example Co. 11", "https://www.courtlistener.com/docket/11/doe-v-example/",
+        "court_verdict", "courtlistener_docket", "high", None)
+    assert found.facts == {
+        "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example", "docket_number": "1:11-cv-0001",
+        "date_filed": "2021-05-01", "nature_of_suit": "791 ERISA", "named_as": [],
+        "files": [{"file_id": file_id, "title": "Exhibit 2, Appeal Decision Letter"}],
+        "match": {"score": 85, "level": "high", "role": "expert witness", "reasons": [WHY], "checked_by": "agent"}}
+    assert f"his role: expert witness (high match); {WHY}" in finding_line(found)  # what the profile AI reads
+    assert rows(tool_ctx)[-1] == ("court_verdict", "done", "high, expert witness")
 
 
-def test_named_as_a_party_goes_to_the_ai(tool_ctx, research_sources):
-    """No filing passage, but the docket lists the expert as a party: the AI decides (a lawsuit
-    against the expert matters)."""
-    check = ai((60, "party", "SYNTHETIC same name and state; he is the defendant"))
-    research_sources({"courtlistener.search_dockets": [cl_docket(3, "2022-01-01", passage=None, named_as=["party"])],
-                      "llm.call_model": check})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    assert "- Alex Rivera is named as a party on the docket" in check.prompts[0]
-    assert [(c["level"], c["role"]) for c in reply["cases"]] == [("medium", "party")]
-    assert tool_ctx.findings()[0].facts["named_as"] == ["party"]
+@pytest.mark.parametrize("score,level,confidence,note", [
+    (150, "high", "high", None), (60, "medium", "low", None), (30, "low", "low", court.LOW_NOTE),
+    (5, "ruled out", "low", court.RULED_OUT), (-7, "ruled out", "low", court.RULED_OUT)])
+def test_verdict_levels(tool_ctx, research_sources, score, level, confidence, note):
+    research_sources()
+    search(tool_ctx)
+    assert verdict(tool_ctx, same_person=score, role="party")["level"] == level
+    [found] = tool_ctx.findings()
+    assert (found.confidence, found.note, found.facts["match"]["score"]) == (confidence, note, max(0, min(100, score)))
+
+
+def test_verdict_refusals_save_nothing(tool_ctx, research_sources, tmp_path):
+    passage = f"{SNIPPET} the claim was reviewed by Dr. Alex J. Rivera, a toxicologist"
+    research_sources({"courtlistener.search_dockets": [cl_docket(11, "2021-05-01",
+                                                                 documents=[cl_filing(11, passage=passage)])]})
+    assert verdict(tool_ctx) == {"error": court.UNKNOWN_CASE}  # no search yet
+    search(tool_ctx)
+    assert verdict(tool_ctx, role="witness") == {"error": court.BAD_ROLE}
+    assert verdict(tool_ctx, why="  ") == {"error": court.NO_WHY}
+    assert verdict(tool_ctx, why="He is: the claim was reviewed by Dr. Alex J. Rivera, a toxicologist") == {
+        "error": court.COPIED_WHY}
+    assert tool_ctx.findings() == [] and SNIPPET not in stored(tool_ctx, tmp_path)
+
+
+def test_one_verdict_per_case(tool_ctx, research_sources):
+    research_sources()
+    search(tool_ctx)
+    first = verdict(tool_ctx)
+    again = verdict(tool_ctx, same_person=5, role="party", why="SYNTHETIC changed my mind")
+    assert again == {"ref": first["ref"], "level": "high", "already_decided": True}
+    assert len(tool_ctx.findings()) == 1
+
+
+def test_court_tools_run_through_the_main_agent(tool_ctx, research_sources, adk_model):
+    research_sources()
+    adk_model.script = [call("court_search", words="toxicology"),
+                        call("court_verdict", docket_id=11, same_person=80, role="expert witness", why=WHY), "DONE"]
+    asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
+    job = store.get_job(tool_ctx.job_id)
+    assert job.status == "done"
+    assert [(a.tool, a.label, a.status) for a in job.activity] == [
+        ("court_search", "Court search", "done"), ("court_verdict", "Court case verdict", "done")]
+    assert [f.kind for f in tool_ctx.findings()] == ["court_docket"]
+    assert {"court_filings", "court_file"} <= set(adk_model.seen[0].tools_dict)
+
+
+# --- shared ---------------------------------------------------------------------------------------
 
 
 def test_known_so_far_caps_each_kind(tool_ctx):
@@ -126,171 +318,19 @@ def test_known_so_far_caps_each_kind(tool_ctx):
     assert "- Faculty page" in text  # the candidate's evidence from the search
 
 
-def test_ai_down_falls_back_to_the_code_score(tool_ctx, research_sources):
-    url = cl_docket(5, "")["url"]
-    tool_ctx.expert = EXPERT.model_copy(update={"evidence": [
-        Evidence(source="courtlistener", url=url + "  ", title="Doe v. Example Co. 5")]})
-    research_sources({"courtlistener.search_dockets": [cl_docket(5, "2015-03-03", court="District Court, N.D. Ohio",
-                                                                 passage=FULL)],
-                      "llm.call_model": AI_DOWN})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    [found] = tool_ctx.findings()
-    assert (found.url, found.confidence) == (url, "high")
-    assert found.facts["match"] == {"score": 100, "level": "high", "checked_by": "code", "reasons": [
-        "case link is in the candidate's evidence", "full name in the filings",
-        "field word near the name", "court in the expert's state"]}
-    assert [(c["score"], c["level"]) for c in reply["cases"]] == [(100, "high")]
-    assert gaps(tool_ctx) == [AI_DOWN_GAP]  # the model failed: the code score is used
+def test_own_ids_never_look_like_secrets(tool_ctx):
+    """A random id can hold 12+ digits in a row (a card number to looks_secret); facts hold file_ids.
+    Only ids with a hex letter are exempt: a card number after one of our prefixes is still caught."""
+    assert not secret("file_1234567890123a56") and not secret("see fnd_a1b2c3d4e5f60718 for the case")
+    assert secret("file_4111111111111111") and secret("fnd_4111111111111111 note")
+    assert secret("fnd_a1b2c3d4e5f60718 4111 1111 1111 1111")  # a card number next to a real id
+    ref = tool_ctx.add_finding("court_docket", "SYNTHETIC case", "https://www.courtlistener.com/docket/1/x/",
+                               facts={"files": [{"file_id": "file_1234567890123a56", "title": "SYNTHETIC"}]})
+    assert ref and tool_ctx.findings()[0].facts["files"][0]["file_id"] == "file_1234567890123a56"
 
 
-def test_surname_only_is_never_kept(tool_ctx, research_sources):
-    """Gotcha 13: a case giving only "Dr. Rivera" (or no passage at all) is never kept nor sent to the
-    AI, even with the field word and a court in the expert's state (the default AI call would fail)."""
-    research_sources({"courtlistener.search_dockets": [
-        cl_docket(1, "2020-01-01", court="District Court, S.D. Ohio", passage=SURNAME),
-        cl_docket(3, "2018-01-01", passage=None)]})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    assert tool_ctx.findings() == []
-    assert reply == {"cases": [], "skipped_same_name": 2, "files": []}
-    assert gaps(tool_ctx) == [("court_records", "2 same-name court cases skipped: not tied to this person")]
-
-
-def test_ai_down_full_name_only_is_kept_low_with_a_verify_note(tool_ctx, research_sources):
-    """AI down, code score: full name, nothing else (25) and full name + home state (35): kept "low"."""
-    research_sources({"courtlistener.search_dockets": [
-        cl_docket(1, "2020-01-01", passage=NO_FIELD),
-        cl_docket(2, "2019-01-01", court="District Court, S.D. Ohio", passage=NO_FIELD)],
-        "llm.call_model": AI_DOWN})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    found = tool_ctx.findings()
-    assert [(f.facts["match"]["score"], f.facts["match"]["level"], f.confidence, f.note) for f in found] == [
-        (25, "low", "low", LOW_NOTE), (35, "low", "low", LOW_NOTE)]
-    assert [(c["score"], c["level"]) for c in reply["cases"]] == [(25, "low"), (35, "low")]
-    assert reply["skipped_same_name"] == 0 and gaps(tool_ctx) == [AI_DOWN_GAP]
-
-
-def test_court_in_state_needs_the_whole_state_name():
-    assert court_in_state("District Court, N.D. Ohio", "OH")
-    assert not court_in_state("Supreme Court of Appeals of West Virginia", "VA")
-    assert court_in_state("Supreme Court of Virginia", "VA")
-    assert not court_in_state("Supreme Court of Arkansas", "KS")
-    assert not court_in_state("Court of Appeals for the Sixth Circuit", "OH")
-    assert not court_in_state("Supreme Court of Ohio", None)
-
-
-def test_no_cases_is_a_gap(tool_ctx, research_sources):
-    research_sources({"courtlistener.search_dockets": []})
-    assert asyncio.run(run_tool(tool_ctx, "court_records")) == {"cases": [], "skipped_same_name": 0, "files": []}
-    assert gaps(tool_ctx) == [("court_records", NONE_GAP)]
-
-
-def test_source_failing_is_tool_failed(tool_ctx, research_sources):
-    research_sources({"courtlistener.search_dockets": RuntimeError("CourtListener HTTP 500")})
-    assert asyncio.run(run_tool(tool_ctx, "court_records")) == {"error": TOOL_FAILED}
-    assert rows(tool_ctx) == [("court_records", "failed", "RuntimeError")]
-    assert gaps(tool_ctx) == [("court_records", "Court records failed (RuntimeError)")]
-
-
-def test_a_source_failure_tells_the_agent_and_the_log_what_happened(tool_ctx, research_sources):
-    research_sources({"courtlistener.search_dockets": SourceFailed(courtlistener_source.TIMED_OUT)})
-    reply = asyncio.run(run_tool(tool_ctx, "court_records"))
-    assert reply == {"error": f"source call failed: {courtlistener_source.TIMED_OUT}"}
-    assert rows(tool_ctx) == [("court_records", "failed", courtlistener_source.TIMED_OUT)]
-    assert gaps(tool_ctx) == [("court_records", f"Court records failed: {courtlistener_source.TIMED_OUT}")]
-
-
-def test_no_token_is_skipped(tool_ctx, sources, monkeypatch):
-    """Gotcha 11: the real source refuses before any request (fake HTTP routes installed anyway)."""
-    _, seen = sources()
-    monkeypatch.delenv("COURTLISTENER_TOKEN")
-    for tool_name, args in (("court_records", {}), ("court_case", {"case_name": "Doe v. Example Co."})):
-        reply = asyncio.run(run_tool(tool_ctx, tool_name, **args))
-        assert reply == {"error": "source not available: COURTLISTENER_TOKEN is not set"}
-    assert [r[1] for r in rows(tool_ctx)] == ["skipped", "skipped"] and seen == []
-    assert gaps(tool_ctx) == [("court_records", "COURTLISTENER_TOKEN is not set"),
-                              ("court_case", "COURTLISTENER_TOKEN is not set")]
-
-
-def found_case(case_name, name, court, year):
-    return cl_docket(11, "2019-04-02", passage=FULL) | {"case_name": "Doe v. Example Co."}
-
-
-def test_court_case_found(tool_ctx, research_sources, tmp_path):
-    check = ai((90, "expert witness", "SYNTHETIC same specialty"))
-    calls = research_sources({"courtlistener.find_case": found_case, "llm.call_model": check})
-    reply = asyncio.run(run_tool(tool_ctx, "court_case", case_name="Doe v Example", court="N.D. Example",
-                                 year="2019"))
-    assert calls[0] == ("courtlistener.find_case", ("Doe v Example", "Alex Rivera", "N.D. Example", 2019), {})
-    assert "C1: Doe v. Example Co. | District Court, N.D. Example | filed 2019-04-02" in check.prompts[0]
-    [found] = tool_ctx.findings()
-    assert (found.kind, found.url, found.confidence, found.title, found.note, found.source_type) == (
-        "case_check", "https://www.courtlistener.com/docket/11/doe-v-example/", "high", "Doe v. Example Co.",
-        "found in federal court records (CourtListener RECAP)", "courtlistener_docket")
-    assert found.facts["status"] == "found" and found.facts["court_record"]["docket_number"] == "1:11-cv-0001"
-    assert found.facts["match"]["role"] == "expert witness" and found.facts["match"]["checked_by"] == "ai"
-    assert found.facts["documents"][0]["description"] == "Exhibit 2, Appeal Decision Letter"
-    assert reply["found"] is True and reply["ref"] == found.finding_id and reply["passages"] == [FULL]
-    assert reply["same_person"] == {"score": 90, "level": "high", "role": "expert witness",
-                                    "why": "SYNTHETIC same specialty"}
-    assert rows(tool_ctx) == [("court_case", "done", "found · checked against no profile yet, 0 findings")]
-    assert SNIPPET not in stored(tool_ctx, tmp_path)  # search passages: AI and reply only (gotcha 15)
-
-
-def test_court_case_about_a_namesake_is_not_saved(tool_ctx, research_sources):
-    research_sources({"courtlistener.find_case": found_case,
-                      "llm.call_model": ai((5, "party", "SYNTHETIC the defendant, a police officer"))})
-    reply = asyncio.run(run_tool(tool_ctx, "court_case", case_name="Doe v Example"))
-    assert tool_ctx.findings() == [] and reply["found"] is True and reply["ref"] is None
-    assert reply["same_person"] == {"score": 5, "level": "low", "role": "party",
-                                    "why": "SYNTHETIC the defendant, a police officer"}
-    assert rows(tool_ctx) == [("court_case", "done", "found, another person · checked against no profile yet, 0 findings")]
-
-
-def test_court_case_does_not_check_a_saved_case_again(tool_ctx, research_sources):
-    """No circular re-check: a case court_records saved is answered from its finding, by name without
-    a search, or by docket URL after the search, never with a second AI check."""
-    check = ai((85, "consultant or reviewer", "SYNTHETIC same field"), (80, "consultant or reviewer", "SYNTHETIC"))
-    calls = research_sources({"courtlistener.find_case": found_case, "llm.call_model": check})
-    asyncio.run(run_tool(tool_ctx, "court_records"))
-    [saved] = [f for f in tool_ctx.findings("court_docket") if f.facts["case_name"] == "Doe v. Example Co. 11"]
-    by_name = asyncio.run(run_tool(tool_ctx, "court_case", case_name="doe v example co 11"))
-    assert by_name == {"found": True, "ref": saved.finding_id, "already_found": True,
-                       "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example",
-                       "date_filed": "2021-05-01", "docket_number": "1:11-cv-0001",
-                       "same_person": {"score": 85, "level": "high", "role": "consultant or reviewer",
-                                       "why": "SYNTHETIC same field"}}
-    by_url = asyncio.run(run_tool(tool_ctx, "court_case", case_name="Doe v. Example"))  # another name, same docket
-    assert by_url["already_found"] and by_url["ref"] == saved.finding_id
-    assert [c[0] for c in calls].count("courtlistener.find_case") == 1 and len(check.prompts) == 1
-    assert tool_ctx.findings("case_check") == []
-    assert rows(tool_ctx)[-1] == ("court_case", "done", f"already found ({saved.finding_id}); not checked again")
-
-
-def test_court_case_not_found_saves_nothing(tool_ctx, research_sources):
-    research_sources()
-    assert asyncio.run(run_tool(tool_ctx, "court_case", case_name="Invented v. Nobody")) == {"found": False}
-    assert tool_ctx.findings() == [] and gaps(tool_ctx) == []
-    assert rows(tool_ctx) == [("court_case", "done", "not found")]
-
-
-def test_caps(tool_ctx, research_sources):
-    research_sources({"llm.call_model": AI_DOWN})
-    assert "error" not in asyncio.run(run_tool(tool_ctx, "court_records"))
-    assert asyncio.run(run_tool(tool_ctx, "court_records")) == {"error": LIMIT_REACHED}
-    replies = [asyncio.run(run_tool(tool_ctx, "court_case", case_name="Doe v. Example Co.")) for _ in range(7)]
-    assert all(r["found"] for r in replies[:6]) and replies[6] == {"error": LIMIT_REACHED}
-    assert all(r["already_found"] for r in replies[:6])  # court_records saved docket 11: never checked again
-    assert tool_ctx.findings("case_check") == []
-    assert [(r[0], r[1], r[2]) for r in rows(tool_ctx) if r[1] == "refused"] == [
-        ("court_records", "refused", "cap used up"), ("court_case", "refused", "cap used up")]
-
-
-def test_court_records_runs_through_the_main_agent(tool_ctx, research_sources, adk_model):
-    research_sources({"llm.call_model": ai((80, "expert witness", "SYNTHETIC"), (80, "expert witness", "SYNTHETIC"))})
-    adk_model.script = [call("court_records"), "DONE"]
-    asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
-    job = store.get_job(tool_ctx.job_id)
-    assert job.status == "done"
-    assert [(a.tool, a.label, a.status) for a in job.activity] == [("court_records", "Court records", "done")]
-    assert {f.kind for f in tool_ctx.findings()} == {"court_docket"}
-    assert "court_case" in adk_model.seen[0].tools_dict
+def test_new_ids_are_never_all_digits(monkeypatch):
+    """gotcha 60: an all-digit id looks like a card number; store.new_id draws again."""
+    tokens = iter(["4111111111111111", "0123456789abcdef"])
+    monkeypatch.setattr(store.secrets, "token_hex", lambda n: next(tokens))
+    assert store.new_id("file") == "file_0123456789abcdef"

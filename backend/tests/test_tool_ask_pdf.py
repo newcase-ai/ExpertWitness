@@ -117,10 +117,21 @@ def test_page_end_past_the_last_page_is_clamped(tool_ctx, adk_model):
     assert "Pages 21-30 of a 30-page file" in adk_model.seen[0].contents[-1].parts[0].text
 
 
+def test_scan_is_read_from_its_saved_ocr_text(tool_ctx, adk_model):
+    """A court filing without a text layer: the [Page N] OCR text saved with it (court_file)."""
+    ocr = "\n".join(f"[Page {n}]\nSYNTHETIC ocr page {n}" for n in (1, 2, 3))
+    file_id = tool_ctx.save_file(TEST_FILE_URL, blank_pdf(3), "application/pdf", text=ocr)
+    adk_model.script = ["SYNTHETIC answer (page 2)."]
+    assert ask(tool_ctx, file_id=file_id, page_start=2, page_end=9)["pages"] == "2-3"
+    [part] = adk_model.seen[0].contents[-1].parts
+    assert "[Page 2]\nSYNTHETIC ocr page 2\n\n[Page 3]\nSYNTHETIC ocr page 3" in part.text
+    assert "page 1" not in part.text
+
+
 def test_unknown_file_lists_court_file_titles(tool_ctx, adk_model):
     file_id = add_pdf(tool_ctx)
-    tool_ctx.add_finding("court_file", "SYNTHETIC Expert report of Alex Rivera", "https://www.courtlistener.com/docket/1/2/x/",
-                         facts={"file_id": file_id})
+    tool_ctx.add_finding("court_docket", "SYNTHETIC Doe v. Example", "https://www.courtlistener.com/docket/1/x/",
+                         facts={"files": [{"file_id": file_id, "title": "SYNTHETIC Expert report of Alex Rivera"}]})
     reply = ask(tool_ctx, file_id="file_made_up", page_start=1, page_end=2)
     assert reply == {"error": f"unknown file: use one of this expert's file_ids: {file_id} "
                               "(SYNTHETIC Expert report of Alex Rivera)"}

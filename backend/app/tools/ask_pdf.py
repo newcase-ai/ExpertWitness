@@ -5,6 +5,8 @@ call is read one range at a time. Nothing is saved: the answer goes to the main 
 problem comes back as an error the main agent can act on."""
 
 import asyncio
+import re
+from pathlib import Path
 
 from pypdf import PdfReader
 from pypdf.errors import PyPdfError
@@ -17,7 +19,7 @@ ANSWER_MAX = 2_000
 NOT_FOUND = "NOT IN PAGES"
 TITLE_SHOWN = 60
 FILES_TEXT_MAX = 4_000  # characters of the file list in an unknown-file refusal
-NO_TEXT = "these pages have no text (a scanned PDF?): this tool reads PDFs with a text layer only"
+NO_TEXT = "these pages have no text (a scanned PDF?): this tool reads a PDF's text layer, or a court filing's OCR text"
 
 INSTRUCTIONS = f"""You are handed the text of some pages of a PDF about an expert witness, plus a
 question and context from the researcher who sent them. Each page starts with a "[Page N]" line
@@ -43,10 +45,21 @@ def pages_text(path: str, page_start: int, page_end: int) -> tuple[str | None, i
     return "\n\n".join(f"[Page {n}]\n{text}" for n, text in zip(numbers, texts)), count, page_end
 
 
+def saved_pages(text_path: str | None, page_start: int, page_end: int) -> str:
+    """Pages page_start..page_end of a saved text version with "[Page N]" lines (a court filing's OCR
+    text, app/tools/courtlistener.py), in pages_text's format; "" when there are none."""
+    if not text_path:
+        return ""
+    parts = re.split(r"^\[Page (\d+)\]\n", Path(text_path).read_text(), flags=re.MULTILINE)
+    pages = {int(n): text.strip() for n, text in zip(parts[1::2], parts[2::2])}
+    return "\n\n".join(f"[Page {n}]\n{pages[n]}" for n in range(page_start, page_end + 1) if pages.get(n))
+
+
 def known_files(ctx: Ctx) -> str:
-    """The dossier's file ids with short titles (a court file's finding title, else its link), cut to
-    fit a refusal: fixed format."""
-    titles = {f.facts.get("file_id"): f.title for f in ctx.findings("court_file")}
+    """The dossier's file ids with short titles (a court filing's title from its case's verdict, else
+    its link), cut to fit a refusal: fixed format."""
+    titles = {x.get("file_id"): x.get("title") for f in ctx.findings("court_docket")
+              for x in f.facts.get("files") or [] if isinstance(x, dict)}
     items = [f"{r['file_id']} ({(titles.get(r['file_id']) or r['source_url'])[:TITLE_SHOWN]})"
              for r in memory.files(ctx.dossier_id)]
     shown, size = [], 0
@@ -63,7 +76,7 @@ def known_files(ctx: Ctx) -> str:
 async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, question: str,
                   context: str = "") -> dict:
     """Ask one question about pages page_start to page_end (1-based, both included) of one saved
-    PDF (file_id from download_file, or from the `files` that court_records / court_case saved). A
+    PDF (file_id from download_file or court_file). A
     page_end past the last page is read up to the last page, so you need not know the page count
     first. Think of this tool as a person who is handed only those pages, your context and your question, and nothing else: they read the pages and answer from them. So
     give good context: who the expert is, what you are looking for and why, and what you already
@@ -84,6 +97,8 @@ async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, questi
     if text is None:
         return refuse(f"bad page range {page_start}-{page_end}: the file has {count} pages, so use "
                       f"1 <= page_start <= {count} and page_start <= page_end")
+    if not text:  # a scan: the OCR text saved with a court filing, if any
+        text = await asyncio.to_thread(saved_pages, row["text_path"], page_start, page_end)
     if not text:
         return refuse(NO_TEXT)
     prompt = (f"Question: {question}\n\nContext from the researcher: {context or 'none'}\n\n"

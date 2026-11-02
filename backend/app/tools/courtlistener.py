@@ -1,318 +1,242 @@
-"""Tool 1: court records (CourtListener; DESIGN 4B.9). Gotchas 5, 11, 13, 23: rate limits, cache and
-the token check stay in app/sources/courtlistener.py; surname-only matches are never kept.
+"""Tool 1: court records (CourtListener's RECAP archive of PACER dockets; DESIGN 4B.9), driven by the
+main agent (user decision 2026-11-02): it chooses what to search, which filings to read, and decides
+itself whether a case is about the expert. court_search -> cases and the filings that matched the
+name; court_filings -> all public filings of a case; court_file -> one filing downloaded with its
+text, for ask_pdf; court_verdict -> the agent's same-person decision, saved as the case's finding.
 
-Federal dockets and filings (RECAP, CourtListener's archive of PACER), not opinions: most cases never
-get an opinion, while experts show up in filings (user decision 2026-11-01). Same person or only the
-same name: the AI compares each case with what the research knows so far about the expert (the
-candidate and the profile) and gives a 0-100 likelihood, the person's role in the case and a reason.
-The code-made score below is the fallback when the model fails."""
+The search always holds the full name (gotcha 13); code drops and scores nothing. Rate limits, cache
+and the token check stay in app/sources/courtlistener.py (gotchas 5, 11, 53). Search passages go to
+the agent only, never stored (gotcha 15); a verdict's `why` must not copy them or the filings."""
 
+import asyncio
 import json
-import re
+import time
 
-from app import llm
-from app.evidence import refuse, words
-from app.profile import context_label, known_so_far
-from app.sources import US_STATES, courtlistener, fold, has_full_name, state_of
+from app import pdf_text, trace
+from app.evidence import copied, refuse, squash
+from app.sources import SourceFailed, SourceSkipped, courtlistener, fold
 from app.tools import RESULT_MAX, Ctx, tool
-from app.tools.court_files import check_case_files
 
-MAX_CASES = 10
-STEM = 6  # ponytail: crude stemming, a shared 6-letter prefix counts ("chiropractic" ~ "chiropractor")
-KEEP_SCORE = 25  # full name alone: kept as level "low" (user decision 2026-10-29)
-MEDIUM_SCORE = 40
-HIGH_SCORE = 75
+WORDS_MAX = 200
 CASE_NAME_MAX = 200
-# Same-person score (0-100): points and the code-made reason shown with them.
-EVIDENCE = (50, "case link is in the candidate's evidence")
-FULL_NAME = (25, "full name in the filings")
-FIELD_WORD = (15, "field word near the name")
-STATE_COURT = (10, "court in the expert's state")
-SKIPPED_GAP = "{} same-name court cases skipped: not tied to this person"
-NONE_GAP = "no federal court filings in CourtListener (RECAP) name this person"
-FOUND_NOTE = "found in federal court records (CourtListener RECAP)"
-LOW_NOTE = "full name only; verify it is the same person"
-AI_LOW_NOTE = "may be another person with the same name; verify it is the same person"
-
-# The AI same-person check (user decision 2026-11-01): context from app/profile.py (known_so_far).
+TITLE_SHOWN = 100
+PASSAGE_SHOWN = 300
 REASON_MAX = 300
+FILES_KEPT = 10  # downloaded filings listed in a verdict's facts
+NAME_PAGES_MAX = 20
+REPLY_BUDGET = RESULT_MAX - 300  # room for the counts next to the list
 ROLES = ("expert witness", "consultant or reviewer", "party", "judge", "lawyer", "other witness",
          "mentioned only", "unclear")
-CHECK_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["cases"],
-    "properties": {"cases": {"type": "array", "items": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["id", "same_person", "role", "reason"],
-        "properties": {"id": {"type": "string"}, "same_person": {"type": "integer"},
-                       "role": {"type": "string"}, "reason": {"type": "string"}},
-    }}},
-}
-CHECK_INSTRUCTIONS = f"""You check whether federal court cases are about one specific expert witness
-or about someone else with the same name. You get what the research knows about the expert so far
-and, for each case (C1, C2, ...), its name, court, date, docket details and passages from the filings
-that name the person. For each case give: same_person, how likely (0-100) the person named in it is
-this expert; role, that person's role in the case, one of: {", ".join(ROLES)}; reason, one sentence
-in your own words naming the details that match or conflict. A shared name is not evidence: many
-people share a name. Raise the likelihood for concrete matches (same profession or specialty, same
-kind of cases, same employer, institution, credentials, state or city). Lower it for conflicts (a
-different profession, or the person is a party, an officer or a judge while the expert is, say, a
-physician). If the passages do not say enough, say "unclear" and stay near 50. Use only what you are
-given; never invent facts. Professional facts only."""
-
-
-def plain_url(url: str) -> str:
-    return url.strip().rstrip("/").lower()
-
-
-def newest_cases(hits: list[dict], evidence: set[str]) -> list[dict]:
-    """Up to MAX_CASES distinct cases: those in the candidate's evidence first, then newest filing date first."""
-    seen, picked = set(), []
-    for hit in sorted(hits, key=lambda h: h.get("date_filed") or "", reverse=True):
-        if (key := plain_url(hit["url"])) not in seen:
-            seen.add(key)
-            picked.append(hit)
-    picked.sort(key=lambda h: plain_url(h["url"]) not in evidence)  # stable: dates stay in order
-    return picked[:MAX_CASES]
-
-
-def mentions_field(passages: list[str], field: str | None) -> bool:
-    """True if a passage around the name shares a specialty word (or its STEM prefix) with the field."""
-    wanted = {w[:STEM] for w in words(field)}
-    return bool(wanted) and any(w[:STEM] in wanted for w in words(" ".join(passages)))
-
-
-def court_in_state(court: str, state: str | None) -> bool:
-    """True if the court's name holds the state's name ("District Court, N.D. Ohio" for OH).
-    Longer state names holding it are removed first ("West Virginia" is not Virginia)."""
-    text = fold(court)
-    for wanted in (n for n, code in US_STATES.items() if code == state):
-        for other in US_STATES:
-            if wanted in other and other != wanted:
-                text = text.replace(other, " ")
-        if re.search(rf"\b{wanted}\b", text):
-            return True
-    return False
+HIGH_SCORE, MEDIUM_SCORE, LOW_SCORE = 75, 40, 25
+TEXT_LAYER, COURTLISTENER_OCR, LOCAL_OCR = "text layer", "courtlistener ocr", "local ocr"
+# Fixed texts (never source or model text)
+TOO_LONG = f"words and case_name: at most {WORDS_MAX} characters each"
+NONE_GAP = "no federal court filings in CourtListener (RECAP) name this person"
+MORE_GAP = "court filings of {} past the first {} not listed"
+UNKNOWN_CASE = "unknown docket_id: use one from a court_search reply"
+UNKNOWN_FILING = "unknown document_id: use one from a court_search or court_filings reply"
+NOT_AVAILABLE = "this filing is not public on CourtListener (nobody bought it from PACER): it cannot be downloaded"
+NO_TEXT = "no text could be read from this filing"
+OCR_TIME = "the run's time ran out while reading this scanned filing"
+BAD_ROLE = f"role must be one of: {', '.join(ROLES)}"
+NO_WHY = "why must say in your own words what matched or conflicted"
+COPIED_WHY = "why copies text from the passages or filings: say it in your own words"
+NOT_SAVED = "the verdict was not saved (it looked like a secret): reword why"
+LOW_NOTE = "may be another person with the same name; verify it is the same person"
+RULED_OUT = "another person with the same name (ruled out)"
 
 
 def level_of(score: int) -> str:
-    return "high" if score >= HIGH_SCORE else "medium" if score >= MEDIUM_SCORE else "low"
+    return ("high" if score >= HIGH_SCORE else "medium" if score >= MEDIUM_SCORE
+            else "low" if score >= LOW_SCORE else "ruled out")
 
 
-def match(in_evidence: bool, passages: list[str], court: str, ctx: Ctx) -> dict | None:
-    """Code-made same-person score, or None for a surname-only case (gotcha 13): no full name in
-    the passages and not in the candidate's evidence."""
-    expert = ctx.expert
-    full_name = has_full_name(" ".join(passages), expert.display_name)
-    if not in_evidence and not full_name:
-        return None
-    checks = [(in_evidence, EVIDENCE), (full_name, FULL_NAME),
-              (full_name and mentions_field(passages, expert.field), FIELD_WORD),
-              (court_in_state(court, state_of(expert.location)), STATE_COURT)]
-    score = sum(points for ok, (points, _) in checks if ok)
-    return {"score": score, "level": level_of(score), "reasons": [reason for ok, (_, reason) in checks if ok],
-            "checked_by": "code"}
+def compact(item: dict) -> dict:
+    """`item` without empty values: smaller replies."""
+    return {k: v for k, v in item.items() if v not in (None, "", [])}
 
 
-def ai_lines(hit: dict, name: str) -> list[str]:
-    """What the AI reads about one case besides its name, court and date: docket details, the filings
-    that name the person (description and search passage) and whether the docket lists them as a party
-    or lawyer. Code-made; the passages stay in memory (gotcha 15)."""
-    details = "; ".join(x for x in (hit["docket_number"] and f"docket {hit['docket_number']}",
-                                    hit["nature_of_suit"] and f"nature of suit: {hit['nature_of_suit']}") if x)
-    lines = [details] if details else []
-    lines += [f"{name} is named as a {role} on the docket" for role in hit["named_as"]]
-    descriptions = [d["description"] for d in hit["documents"]]
-    for n, passage in enumerate(hit["passages"]):
-        lines.append(f"{descriptions[n]}: {passage}" if n < len(descriptions) and descriptions[n] else passage)
-    return lines
+def fitted(items: list[dict]) -> tuple[list[dict], int]:
+    """The first items that fit REPLY_BUDGET as JSON, and how many were left out."""
+    shown, size = [], 2
+    for item in items:
+        size += len(json.dumps(item)) + 2
+        if size > REPLY_BUDGET:
+            break
+        shown.append(item)
+    return shown, len(items) - len(shown)
 
 
-async def same_person_check(ctx: Ctx, cases: list[dict]) -> tuple[dict[str, dict] | None, str]:
-    """(the AI's verdict per case id ("C1", ...): {score, level, role, reasons, checked_by, context}, what
-    it was checked against for the log). `cases`: {id, case_name, court, date_filed, lines}. No
-    verdicts (and a gap) when the model fails."""
-    against = context_label(ctx)
-    blocks = [f"{c['id']}: {c['case_name'] or 'unnamed case'} | {c['court'] or 'court unknown'} | filed "
-              f"{c['date_filed'] or 'unknown'}\n" + ("\n".join(f"- {line}" for line in c["lines"])
-                                                    or "- (no text around the name)") for c in cases]
-    prompt = (f"The expert:\n{known_so_far(ctx)}\n\nFederal court cases naming {ctx.expert.display_name}:\n\n"
-              + "\n\n".join(blocks))
-    try:
-        data = await ctx.ask_model(CHECK_INSTRUCTIONS, prompt, schema=CHECK_SCHEMA)
-    except llm.ModelError as e:
-        ctx.add_gap(f"AI same-person check failed ({e}); code score used")
-        return None, "AI check failed, code score used"
-    verdicts = {}
-    for row in data.get("cases", []) if isinstance(data, dict) else []:
-        try:
-            score = max(0, min(100, int(row["same_person"])))
-        except (KeyError, TypeError, ValueError):
-            continue  # this case keeps its code score
-        role = row.get("role") if row.get("role") in ROLES else "unclear"
-        reason = (row.get("reason") or "")[:REASON_MAX]  # dropped by ask_model if it copied the passages
-        verdicts[row.get("id")] = {"score": score, "level": level_of(score), "role": role,
-                                   "reasons": [reason] if reason else [], "checked_by": "ai", "context": against}
-    return verdicts, f"checked against {against}"
+def remember(ctx: Ctx, docket_id: int, docs: list[dict]) -> None:
+    """Filings shown to the agent: their ids work in court_file; an older entry keeps its file_id."""
+    for doc in docs:
+        ctx.run.filings[doc["id"]] = ctx.run.filings.get(doc["id"], {}) | doc | {"docket_id": docket_id}
 
 
-def case_facts(hit: dict, same: dict) -> dict:
-    """A case finding's facts: fields copied by code from the docket, and the same-person verdict."""
-    return {k: hit[k] for k in ("case_name", "court", "docket_number", "date_filed", "nature_of_suit",
-                                "named_as", "documents")} | {"match": same}
+def title(doc: dict) -> str:
+    return (doc.get("description") or "no description")[:TITLE_SHOWN]
 
 
-def shown(same: dict) -> dict:
-    return {"score": same["score"], "level": same["level"], "role": same.get("role"), "why": "; ".join(same["reasons"])}
+def doc_number(doc: dict) -> str | None:
+    n = doc.get("document_number")
+    return f"{n}-{doc['attachment_number']}" if n and doc.get("attachment_number") else n
 
 
-@tool(label="Court records", cap=1)
-async def court_records(ctx: Ctx) -> dict:
-    """Find federal court cases whose filings name the expert in full (CourtListener's RECAP archive
-    of PACER dockets: expert reports, declarations, reviewing physicians' letters, motions about
-    experts), or list them as a party or lawyer. Each case is checked against what you have found so
-    far (the profile) and scored 0-100 as the same person, with the person's `role` and `why`: 75+ is
-    level "high", 40-74 "medium", 25-39 "low" (it may be someone else with the same name; say so if
-    you use it). Lower scores are not kept. Federal cases only, and only filings someone has bought
-    from PACER: an empty result does not mean the expert never testified. Use it once, after
-    publications and web search; call it again only if its error says that can help (CourtListener
-    is sometimes slow). Takes no arguments. Each case comes with one passage around the name;
-    `skipped_same_name` counts cases about someone else with the same name. For high and medium cases
-    the case's public filings are checked too: those that are the expert's own work (report,
-    declaration, deposition, CV) or about their testimony (a motion or ruling to admit, limit or
-    exclude them) are saved; `files` lists them (file_id, title, pages): read one with ask_pdf."""
-    name = ctx.expert.display_name
-    hits = await courtlistener.search_dockets(name)
-    if not hits:
+@tool(label="Court search", cap=5)
+async def court_search(ctx: Ctx, words: str = "", case_name: str = "") -> dict:
+    """Search federal court filings (CourtListener's RECAP archive of PACER dockets) for cases whose
+    filings, parties or lawyers name the expert in full. The full name is always searched; `words`
+    adds search words (e.g. `Medtronic`, `"motion to exclude"`, `declaration OR report`) and
+    `case_name` limits it to one case (e.g. "Doe v. Example Co."). Reply: `cases` (first 20 hits,
+    best match first), each with `docket_id`, case name, court, docket number, date filed, nature of
+    suit, `named_as` (the docket lists the expert as party or lawyer) and up to 3 `filings` that
+    matched: `document_id`, title, pages, `available` (can be downloaded) and `passage` (the search's
+    text around the name). Many people share a name: nothing is saved here. Judge each case yourself:
+    read the passages, download the filings that may be the expert's (court_file; court_filings lists
+    all of a case's filings, e.g. to find their own report) and read them with ask_pdf, then record
+    your decision with court_verdict. Federal cases only, and only filings someone bought from PACER:
+    an empty result does not mean the expert never testified. CourtListener allows 50 calls an hour."""
+    if len(words) > WORDS_MAX or len(case_name) > CASE_NAME_MAX:
+        return refuse(TOO_LONG)
+    hits = await courtlistener.search_dockets(ctx.expert.display_name, words, case_name)
+    if not hits and not words.strip() and not case_name.strip():
         ctx.add_gap(NONE_GAP)
-    evidence = {plain_url(e.url) for e in ctx.expert.evidence}
-    cases, checked, skipped, files = [], [], 0, []
-    for hit in newest_cases(hits, evidence):
-        lines = ai_lines(hit, name)
-        code = match(plain_url(hit["url"]) in evidence, lines, hit["court"], ctx)
-        if code is None:  # surname only (gotcha 13): never kept, never sent to the AI
-            skipped += 1
-            continue
-        checked.append((hit, lines, code))
-    verdicts, against = await same_person_check(ctx, [
-        {"id": f"C{i}", "case_name": hit["case_name"], "court": hit["court"], "date_filed": hit["date_filed"],
-         "lines": lines} for i, (hit, lines, _) in enumerate(checked, 1)]) if checked else ({}, "")
-    for i, (hit, _, code) in enumerate(checked, 1):
-        same = (verdicts or {}).get(f"C{i}") or code
-        if same["score"] < KEEP_SCORE:
-            skipped += 1
-            continue
-        note = None
-        if same["level"] == "low":
-            note = AI_LOW_NOTE if same["checked_by"] == "ai" else LOW_NOTE
-        # The search passages are never stored (gotcha 15): only fields copied by code and the verdict.
-        ref = ctx.add_finding("court_docket", hit["case_name"], hit["url"], facts=case_facts(hit, same),
-                              confidence="high" if same["level"] == "high" else "low", note=note,
-                              source_type="courtlistener_docket")
-        if ref:
-            cases.append({"ref": ref, "case_name": hit["case_name"], "court": hit["court"],
-                          "docket_number": hit["docket_number"], "date_filed": hit["date_filed"], **shown(same),
-                          "passage": hit["passages"][0] if hit["passages"] else ""})
-            files += await check_case_files(ctx, hit, same, ref)
-    if skipped:
-        ctx.add_gap(SKIPPED_GAP.format(skipped))
-    ctx.log(f"{len(hits)} cases found, {len(cases)} kept, {skipped} same-name skipped"
-            + (f" · {against}" if against else "") + (f", {len(files)} files saved" if files else ""))
-    return fit({"cases": cases, "skipped_same_name": skipped, "files": files})
+    cases = []
+    for hit in hits:
+        if hit["docket_id"] is None:
+            continue  # no id to read its filings or record a verdict with
+        ctx.run.cases[hit["docket_id"]] = hit
+        remember(ctx, hit["docket_id"], hit["documents"])
+        cases.append(compact({
+            "docket_id": hit["docket_id"], "case_name": hit["case_name"], "court": hit["court"],
+            "docket_number": hit["docket_number"], "date_filed": hit["date_filed"],
+            "nature_of_suit": hit["nature_of_suit"], "named_as": hit["named_as"],
+            "filings": [compact({"document_id": d["id"], "title": title(d), "pages": d["page_count"],
+                                 "available": d["available"], "passage": d["passage"][:PASSAGE_SHOWN]})
+                        for d in hit["documents"]],
+            "more_matched_filings": hit["more_filings"] or None}))
+    shown, not_shown = fitted(cases)
+    ctx.log(f"{len(cases)} cases found" + (f", {not_shown} not shown" if not_shown else ""))
+    return {"cases": shown} | ({"not_shown": not_shown} if not_shown else {})
 
 
-# Cuts that make a worst-case reply (10 long cases, many saved files) fit, in order: (list, key, size;
-# None removes the key). The wrapper drops a longer reply whole; every file is listed if at all possible.
-FIT_CUTS = (("files", "title", 30), ("cases", "passage", 200), ("cases", "why", 150), ("files", "title", None),
-            ("cases", "passage", None), ("cases", "why", None), ("cases", "case_name", 60),
-            ("cases", "court", None), ("cases", "docket_number", None))
+@tool(label="Court case filings", cap=5)
+async def court_filings(ctx: Ctx, docket_id: int) -> dict:
+    """All public (downloadable) filings of one case from court_search, in docket order, up to 100:
+    `document_id`, title, document number, date filed and pages. Use it to find the expert's own
+    filings in a case (report, declaration, deposition, CV) or a motion or ruling about their
+    testimony, then download them with court_file. Costs one CourtListener call per 20 filings."""
+    case = ctx.run.cases.get(docket_id)
+    if case is None:
+        return refuse(UNKNOWN_CASE)
+    docs, more_left = await courtlistener.docket_documents(docket_id)
+    remember(ctx, docket_id, docs)
+    if more_left:
+        ctx.add_gap(MORE_GAP.format(case["case_name"], len(docs)))
+    shown, not_shown = fitted([compact({"document_id": d["id"], "title": title(d), "number": doc_number(d),
+                                        "date_filed": d["date_filed"], "pages": d["page_count"]}) for d in docs])
+    ctx.log(f"{len(docs)} filings" + (f", {not_shown} not shown" if not_shown else ""))
+    return ({"docket_id": docket_id, "filings": shown} | ({"not_shown": not_shown} if not_shown else {})
+            | ({"more_not_listed": True} if more_left else {}))
 
 
-def fit(reply: dict) -> dict:
-    """`reply` cut in FIT_CUTS order until it fits RESULT_MAX; as a last resort the last files are left
-    out (`files_not_listed`; ask_pdf's unknown-file error lists every file_id)."""
-    for where, key, size in FIT_CUTS:
-        if len(json.dumps(reply)) <= RESULT_MAX:
-            return reply
-        for item in reply.get(where) or []:
-            if size is None:
-                item.pop(key, None)
-            elif key in item:
-                item[key] = (item[key] or "")[:size]
-    while len(json.dumps(reply)) > RESULT_MAX and reply.get("files"):
-        reply["files"].pop()
-        reply["files_not_listed"] = reply.get("files_not_listed", 0) + 1
-    return reply
+def numbered(pages: list[str]) -> str:
+    """Every page after a "[Page N]" line: the saved text version ask_pdf falls back to for scans."""
+    return "\n".join(f"[Page {n}]\n{page}" for n, page in enumerate(pages, 1))
 
 
-def same_case_name(a: str, b: str) -> bool:
-    return re.findall(r"[a-z0-9]+", fold(a)) == re.findall(r"[a-z0-9]+", fold(b))
+async def read_text(ctx: Ctx, doc: dict, path) -> tuple[list[str], str, bool]:
+    """(page texts, text source, finished): the PDF's text layer; for a scan, CourtListener's OCR text,
+    else local OCR until the run's time is up (finished False). Raises pdf_text.PdfUnreadable."""
+    pages = await asyncio.to_thread(pdf_text.page_texts, path)
+    if not pdf_text.mostly_empty(pages):
+        return pages, TEXT_LAYER, True
+    try:
+        text = await courtlistener.document_text(doc["id"])
+    except (SourceFailed, SourceSkipped):
+        text = ""
+    if text.strip():
+        return pdf_text.split_text(text), COURTLISTENER_OCR, True
+    pages, finished = await asyncio.to_thread(pdf_text.ocr_pages, path, time.monotonic() + ctx.time_left())
+    trace.record("court_file", step="ocr", doc=doc.get("id"), pages=len(pages), finished=finished)
+    return pages, LOCAL_OCR, finished
 
 
-def saved_case(ctx: Ctx, case_name: str = "", url: str = ""):
-    """This run's court finding for the case (by case name or docket URL), if any."""
-    for f in ctx.findings():
-        if f.kind in ("court_docket", "case_check") and (
-                (url and plain_url(f.url) == plain_url(url))
-                or (case_name and same_case_name(f.facts.get("case_name") or f.title, case_name))):
-            return f
-    return None
+@tool(label="Court file", cap=10)
+async def court_file(ctx: Ctx, document_id: int) -> dict:
+    """Download one court filing (a `document_id` from court_search or court_filings) and save it with
+    its text; scanned filings are read with OCR. Reply: `file_id` to read with ask_pdf, `pages`, and
+    `name_on_pages`: the pages that name the expert in full; read those first to see who the person
+    is and their role in the case. The same filing twice gives the same file_id."""
+    doc = ctx.run.filings.get(document_id)
+    if doc is None:
+        return refuse(UNKNOWN_FILING)
+    if not doc["available"]:
+        return refuse(NOT_AVAILABLE)
+    if doc.get("file_id"):
+        ctx.log("already downloaded")
+        return {"file_id": doc["file_id"], "title": title(doc), "pages": doc["pages"],
+                "name_on_pages": doc["name_on_pages"], "already_downloaded": True}
+    folder = ctx.files_folder() / "tmp"
+    folder.mkdir(exist_ok=True)
+    tmp = folder / f"{document_id}.pdf"
+    try:
+        await courtlistener.download_document(doc["filepath_local"], tmp)
+        try:
+            pages, source, finished = await read_text(ctx, doc, tmp)
+        except pdf_text.PdfUnreadable:
+            return refuse(pdf_text.UNREADABLE)
+        if not finished:
+            return refuse(OCR_TIME)
+        if not "".join(pages).strip():
+            return refuse(NO_TEXT)
+        file_id = await ctx.keep_file(doc["url"], tmp, "application/pdf", numbered(pages))
+    finally:
+        tmp.unlink(missing_ok=True)  # gone already when kept (moved by keep_file)
+    pattern = courtlistener.name_pattern(ctx.expert.display_name)
+    on = [n for n, page in enumerate(pages, 1) if pattern and pattern.search(fold(page))][:NAME_PAGES_MAX]
+    doc |= {"file_id": file_id, "pages": len(pages), "name_on_pages": on}
+    ctx.log(f"{len(pages)} pages, {source}, name on {len(on)} pages")
+    return {"file_id": file_id, "title": title(doc), "pages": len(pages), "text_source": source,
+            "name_on_pages": on}
 
 
-def already_found(ctx: Ctx, found) -> dict:
-    """The reply for a case this run already saved: its verdict, not a new search or AI check."""
-    record = found.facts.get("court_record") or found.facts
-    match = found.facts.get("match")
-    ctx.log(f"already found ({found.finding_id}); not checked again")
-    return {"found": True, "ref": found.finding_id, "already_found": True,
-            **{k: record.get(k) for k in ("case_name", "court", "date_filed", "docket_number")},
-            "same_person": shown(match) if match else None}
-
-
-@tool(label="Court case lookup", cap=6)
-async def court_case(ctx: Ctx, case_name: str, court: str = "", year: int = 0) -> dict:
-    """Check whether one named federal court case (for example "Doe v. Example Co.") is in
-    CourtListener's RECAP archive of PACER dockets and its filings name the expert. Use it for a case
-    some finding or the testimony list names, never a guessed one. `court` and `year` (filing year)
-    are optional and pick the best of several hits. The case is checked against what you have found
-    so far: `same_person` (score, level, role, why); a case about someone else with the same name is
-    not saved. Not found -> {"found": false}. If it fails, its error says whether calling again can help.
-    Not for cases court_records already returned: they are checked and saved (a repeat call only
-    returns the saved verdict, `already_found`). A saved high or medium case also gets its filings
-    checked: `files` lists the saved ones (the expert's own work or about their testimony;
-    file_id, title, pages): read one with ask_pdf."""
-    if len(case_name) > CASE_NAME_MAX:
-        return refuse("case name too long")
-    if found := saved_case(ctx, case_name=case_name):
-        return already_found(ctx, found)
-    hit = await courtlistener.find_case(case_name, ctx.expert.display_name, court or None, year or None)
-    if not hit:
-        ctx.log("not found")
-        return {"found": False}
-    if found := saved_case(ctx, url=hit["url"]):  # another name for a saved case
-        return already_found(ctx, found)
-    record = {k: hit.get(k) for k in ("case_name", "court", "date_filed", "docket_number")}
-    # The passages come from search snippets: to the AI and in the reply only, never stored (gotcha 15).
-    verdicts, against = await same_person_check(ctx, [{"id": "C1", "case_name": hit["case_name"],
-                                                       "court": hit["court"], "date_filed": hit["date_filed"],
-                                                       "lines": ai_lines(hit, ctx.expert.display_name)}])
-    same = (verdicts or {}).get("C1") or {"score": KEEP_SCORE, "level": "low", "role": None,
-                                          "reasons": ["full name in the case"], "checked_by": "code"}
-    if same["score"] < KEEP_SCORE:
-        ctx.log(f"found, another person · {against}")
-        return {"found": True, "ref": None, **record, "same_person": shown(same), "passages": hit["passages"]}
-    low = same["level"] != "high"
-    ref = ctx.add_finding(
-        "case_check", hit.get("case_name") or case_name, hit["url"],
-        facts={"case_name": case_name, "court": court or None, "year": str(year) if year else None,
-               "status": "found", "how": "courtlistener", "link": hit["url"], "court_record": record,
-               "documents": hit["documents"], "match": same},
-        confidence="low" if low else "high",
-        note=f"{FOUND_NOTE}; {AI_LOW_NOTE if same['checked_by'] == 'ai' else LOW_NOTE}" if low else FOUND_NOTE,
-        source_type="courtlistener_docket")
-    files = await check_case_files(ctx, hit, same, ref) if ref else []
-    ctx.log(f"found · {against}" + (f", {len(files)} files saved" if files else ""))
-    return fit({"found": True, "ref": ref, **record, "same_person": shown(same), "passages": hit["passages"],
-                "files": files})
+@tool(label="Court case verdict", cap=10)
+async def court_verdict(ctx: Ctx, docket_id: int, same_person: int, role: str, why: str) -> dict:
+    """Record your decision on one case from court_search: is the person named in it this expert?
+    Call it for every case you looked into, also when it is someone else (the profile then lists it
+    as ruled out). `same_person` 0-100: 75+ sure it is the expert, 40-74 likely, 25-39 unsure, below
+    25 someone else. `role`: the person's role in the case, one of: expert witness, consultant or
+    reviewer, party, judge, lawyer, other witness, mentioned only, unclear. `why`: one or two
+    sentences in your own words naming what matched or conflicted (profession, specialty, employer,
+    place, kind of case); never quote the filings. The case is saved with the filings you downloaded
+    from it. One verdict per case: a second call returns the first."""
+    case = ctx.run.cases.get(docket_id)
+    if case is None:
+        return refuse(UNKNOWN_CASE)
+    if old := next((f for f in ctx.findings("court_docket") if f.url == case["url"]), None):
+        ctx.log(f"already decided ({old.finding_id})")
+        return {"ref": old.finding_id, "level": old.facts.get("match", {}).get("level"), "already_decided": True}
+    if role not in ROLES:
+        return refuse(BAD_ROLE)
+    why = " ".join(why.split())[:REASON_MAX]
+    if not why:
+        return refuse(NO_WHY)
+    filings = [d for d in ctx.run.filings.values() if d["docket_id"] == docket_id]
+    read = [d for d in filings if d.get("file_id")]
+    sources = " ".join([d.get("passage") or "" for d in filings] + [ctx.file_text(d["file_id"]) for d in read])
+    if copied(why, squash(sources)):  # gotcha 15: the finding holds our own words only
+        return refuse(COPIED_WHY)
+    score = max(0, min(100, same_person))
+    level = level_of(score)
+    facts = {k: case[k] for k in ("case_name", "court", "docket_number", "date_filed", "nature_of_suit", "named_as")}
+    facts |= {"files": [{"file_id": d["file_id"], "title": title(d)} for d in read[:FILES_KEPT]],
+              "match": {"score": score, "level": level, "role": role, "reasons": [why], "checked_by": "agent"}}
+    ref = ctx.add_finding("court_docket", case["case_name"], case["url"], facts=facts,
+                          confidence="high" if level == "high" else "low",
+                          note={"low": LOW_NOTE, "ruled out": RULED_OUT}.get(level),
+                          source_type="courtlistener_docket")
+    if ref is None:
+        return refuse(NOT_SAVED)
+    ctx.log(f"{level}, {role}")
+    return {"ref": ref, "level": level}

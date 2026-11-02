@@ -793,8 +793,8 @@ has one step row instead of nine. Example (made-up values):
   "progress": {"done": 0, "total": 1},
   "steps": [{"key": "main_agent", "label": "Research agent", "status": "running", "detail": "6 tool calls", "finished_at": null}],
   "activity": [
-    {"seq": 1, "tool": "court_records", "label": "Court records", "status": "done", "args": {},
-     "detail": "3 opinions kept, 2 same-name skipped", "started_at": "2026-10-29T15:01:02Z", "finished_at": "2026-10-29T15:01:20Z"},
+    {"seq": 1, "tool": "court_search", "label": "Court search", "status": "done", "args": {"words": ""},
+     "detail": "5 cases found", "started_at": "2026-10-29T15:01:02Z", "finished_at": "2026-10-29T15:01:20Z"},
     {"seq": 2, "tool": "sites_for_state", "label": "Sites for a state", "status": "done", "args": {"state": "MI"},
      "detail": "4 sites (from memory)", "started_at": "2026-10-29T15:01:21Z", "finished_at": "2026-10-29T15:01:21Z"},
     {"seq": 3, "tool": "read_web_page", "label": "Read a web page", "status": "refused", "args": {"url": "https://example.gov/search"},
@@ -849,7 +849,7 @@ calls inside tools, the profile update, tools calling tools).
 
 ### 4B.8 Test kit (6e)
 - `FakeAdkModel` (exists, `tests/fakes.py`): a script of turns, e.g.
-  `adk_model.script = [call("court_records"), call("web_search", query="...", topic="testimony"), "DONE"]`.
+  `adk_model.script = [call("court_search"), call("web_search", query="...", topic="testimony"), "DONE"]`.
 - `tool_ctx` fixture (new, `tests/fakes.py`): a `Ctx` on the test's temp SQLite with a synthetic
   expert (Alex Rivera), a job and a dossier, 60 s on the clock, registry caps. Helpers:
   `run_tool(ctx, "tool_name", **args)` calls through the wrapper (so caps, refusals and activity
@@ -868,46 +868,39 @@ all: gotcha 2 (banned sites), 3 (professional records only, never "background ch
 CAPTCHA bypass, IP rotation or fake accounts), 8 (no real people's data in the repo; fixtures are
 synthetic), 15 (no snippet or page text stored). Caps are per job, starting values.
 
-**Tool 1: court records (core, M7).** File `app/tools/courtlistener.py`. Two tools.
-- `court_records()`: label "Court records", cap 1. CourtListener opinions naming the expert near
-  "expert" (`courtlistener.search_opinions(ctx.expert.display_name)`), then passages for the newest
-  `MAX_OPINIONS` (6) (`opinion_passages`). Code scores each opinion as the same person (0-100):
-  +50 opinion URL is in the candidate's evidence, +25 full name in the passages, +15 a field word near
-  the name, +10 court in the expert's state. **Surname only** (no full name in passages and not in
-  evidence): never kept (gotcha 13). Kept if score >= 25: level `high` (>= 75), `medium` (>= 40) or
-  `low` (full name only, note "full name only; verify it is the same person"; user, 2026-10-29). Saves kind
-  `court_opinion` (facts as today plus `match: {score, level, reasons}`); skipped ones are counted in a gap.
-  Reply: `{"opinions": [{"ref", "case_name", "court", "date_filed", "score", "level", "passage"}], "skipped_same_name": n}`.
-- `court_case(case_name: str, court: str = "", year: int = 0)`: label "Court case lookup", cap 6.
-  Looks up one named case for the expert (`courtlistener.find_case`). Found -> kind `case_check`
-  (confidence `high`); not found -> nothing saved, reply `{"found": false}` (an invented case
-  name never becomes a record; replaces gotcha 39's rule).
-- **Court filings** (`app/tools/court_files.py`, a helper, not a tool; user, 2026-11-02): after either
-  tool saves a case of level high or medium, `check_case_files` checks its RECAP filings. At most 10
-  dockets per run (`MAX_CASES_PER_RUN`, `Run.dockets`), each once. Steps: list the public filings
-  (`courtlistener.docket_documents`, query `docket_id:<n> AND is_available:true`, first 100; more ->
-  gap); filings the search hit already matched on the full name (`hit["documents"]`) skip the title
-  check and go first (activity arg `picked: name found by CourtListener search`); one AI title check
-  per case for the rest (context `known_so_far`, skipped if none are left) picks the likely ones (the
-  expert's own report, declaration, affidavit, deposition, CV; for reviewing physicians also claim
-  files, appeal decision letters, peer reviews, IMEs; or a motion/order to admit, limit or exclude them);
-  each picked filing is streamed to `data/files/<dossier>/tmp/`; text in this order: pypdf text layer,
-  CourtListener's own OCR text (`document_text`), local OCR (RapidOCR on pypdfium2 pages, until the
-  run's time is up). Code then needs the full name in the text (gotcha 13; no AI call otherwise); the
-  AI reads batches (`pdf_text.batches`, 128 pages / `BATCH_CHARS`), stops at the first relevant one; an
-  HTTP 400 splits the batch in half, down to one page. Relevant -> finding kind `court_file` (source
-  type `courtlistener_document`, URL = the filing's CourtListener page, facts: case_name, case_ref,
-  document_number, date_filed, page_count, kind `own_work`/`about_testimony`, reason, file_id,
-  text_source; confidence high only for a high case), saved first, then the PDF moved into place by
-  `ctx.keep_file` with a `.md` text version ([Page N] lines). No size cap; everything else is deleted
-  at once. One activity row per filing (`court_file`, fixed reason text; the AI's reason only in the
-  trace and the finding). Out of time -> gap "N court filings not checked: time limit". Replies get
-  `files: [{ref, file_id, title, kind}]` (at most 10) for `ask_pdf`; `court_records` cuts passages,
-  reasons and names (`fit`) so a worst-case reply stays under `RESULT_MAX`.
-- Memories: profile. Legal: gotchas 5, 11 (no token -> `SourceSkipped`), 13, 23. CourtListener
+**Tool 1: court records (core, M7; agent-driven since 2026-11-02).** File `app/tools/courtlistener.py`.
+Four tools; the main agent searches, picks filings to read and decides itself whether a case is the
+expert's (user decision 2026-11-02: no code drop or score; the old `court_records`, `court_case` and
+the automatic filing check are gone). Cases and filings shown to the agent are kept in `Run.cases` /
+`Run.filings`, so later calls take their ids.
+- `court_search(words: str = "", case_name: str = "")`: label "Court search", cap 5. One RECAP search
+  (`courtlistener.search_dockets`, `type=r`): the expert's full-name phrases always (gotcha 13), AND
+  the agent's `words` (field, group and wildcard syntax removed) and the case name's party key words
+  (`case_name_query`), each at most 200 characters. First page (20 cases), CourtListener's order.
+  Each case: docket_id, case name, court, docket number, date filed, nature of suit, `named_as`
+  (party/lawyer), up to 3 matched `filings` (document_id, title, pages, `available`, `passage` = the
+  search snippet) and `more_matched_filings`. Cut to fit `RESULT_MAX` (`not_shown`). Saves nothing;
+  gap only when the plain search finds no case.
+- `court_filings(docket_id: int)`: label "Court case filings", cap 5. A known case's public filings
+  (`docket_documents`, query `docket_id:<n> AND is_available:true`, first 100, one call per 20; more ->
+  gap and `more_not_listed`): document_id, title, number, date filed, pages.
+- `court_file(document_id: int)`: label "Court file", cap 10. Streams one known, available filing to
+  `data/files/<dossier>/tmp/`, text in this order: pypdf text layer, CourtListener's OCR text
+  (`document_text`), local OCR (RapidOCR on pypdfium2 pages, until the run's time is up), then
+  `ctx.keep_file` with a `.md` text version ([Page N] lines; `ask_pdf` reads it for scans). Reply:
+  file_id, title, pages, text_source, `name_on_pages` (pages naming the expert in full,
+  `courtlistener.name_pattern`). The same filing again returns its file_id. No finding.
+- `court_verdict(docket_id: int, same_person: int, role: str, why: str)`: label "Court case verdict",
+  cap 10. The agent's decision on a known case, one per case (a repeat returns the first). `role` one
+  of expert witness, consultant or reviewer, party, judge, lawyer, other witness, mentioned only,
+  unclear; `why` at most 300 characters and refused if it copies the case's passages or downloaded
+  filings (gotcha 15). Saves kind `court_docket` (source type `courtlistener_docket`, facts: case_name,
+  court, docket_number, date_filed, nature_of_suit, named_as, `files` [{file_id, title}] downloaded
+  from the case, `match` {score, level, role, reasons, checked_by "agent"}). Level: `high` >= 75
+  (confidence high), `medium` >= 40, `low` >= 25 (note "may be another person..."), else `ruled out`
+  (note "another person with the same name (ruled out)", so the profile lists it under not_him).
+- Memories: profile. Legal: gotchas 5, 11 (no token -> `SourceSkipped`), 13, 15, 23, 53. CourtListener
   budget stays in the source client.
-- Done when: both tools pass their tests; surname-only never kept; live Gary Stanton run keeps
-  Taylor v. Moore with a score.
 
 **Tool 2: sites for a state (engineer, T2).** File `app/tools/state_sites.py`.
 `sites_for_state(state: str)`, label "Sites for a state", cap 3.

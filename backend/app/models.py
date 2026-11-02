@@ -203,7 +203,7 @@ class ResearchRequest(BaseModel):
 
     candidate_id: str
     # Optional list of cases the expert testified in, pasted by the app's user. Only the cases the AI
-    # parses from it are kept (as case_check findings); the text itself is never stored.
+    # finds from it are kept (as findings); the text itself is never stored.
     testimony_list: str | None = Field(default=None, max_length=TESTIMONY_LIST_MAX)
 
 

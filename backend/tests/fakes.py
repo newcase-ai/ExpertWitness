@@ -195,16 +195,22 @@ def sources_fixture(monkeypatch):
 # Research tools: fake return values of the source functions, keyed "module.function".
 
 
-def cl_docket(did, date, court="District Court, N.D. Example",
-              passage="Exhibit 2: the claim was reviewed by Dr. Alex J. Rivera, a toxicologist", named_as=()):
-    """A RECAP docket as courtlistener.search_dockets / find_case return it (synthetic)."""
+def cl_filing(did, n=2, passage="Exhibit 2: the claim was reviewed by Dr. Alex J. Rivera, a toxicologist",
+              description="Exhibit 2, Appeal Decision Letter", available=True, pages=3):
+    """A RECAP filing as courtlistener.to_document gives it, with its search passage (synthetic)."""
+    return {"id": did * 100 + n, "description": description, "document_number": str(n), "attachment_number": None,
+            "date_filed": "2021-05-01", "page_count": pages, "available": available,
+            "filepath_local": f"recap/synthetic.{did}.{n}.pdf" if available else None,
+            "url": f"https://www.courtlistener.com/docket/{did}/{n}/doe-v-example/", "passage": passage}
+
+
+def cl_docket(did, date, court="District Court, N.D. Example", named_as=(), documents=None):
+    """A RECAP docket as courtlistener.search_dockets returns it (synthetic)."""
     return {"url": f"https://www.courtlistener.com/docket/{did}/doe-v-example/", "docket_id": did,
             "case_name": f"Doe v. Example Co. {did}",
             "court": court, "docket_number": f"1:{did}-cv-0001", "date_filed": date, "nature_of_suit": "791 ERISA",
-            "named_as": list(named_as),
-            "documents": [{"description": "Exhibit 2, Appeal Decision Letter", "date_filed": date,
-                           "url": f"https://www.courtlistener.com/docket/{did}/12/2/doe-v-example/"}],
-            "passages": [passage] if passage else []}
+            "named_as": list(named_as), "more_filings": False,
+            "documents": [cl_filing(did)] if documents is None else documents}
 
 
 def work(n, year, doi=True, retracted=False):
@@ -229,23 +235,13 @@ def scrape_page(url):
     return {"url": url, "title": "Alex J. Rivera - CV", "markdown": PAGE_MARKDOWN}
 
 
-def find_case(case_name, name, court=None, year=None):
-    """Only "Doe v. Example Co." is in CourtListener."""
-    if case_name != "Doe v. Example Co.":
-        return None
-    return cl_docket(11, "2019-04-02") | {"case_name": case_name}
-
-
 def model_reply(instructions, input, schema=None, web_search=False, output_type=None):
     """Default AI call in research tests: none is expected unless a test sets its own."""
     raise AssertionError("unexpected AI call in a research test")
 
 
 RESEARCH_SOURCES = {
-    # docket 11 twice (same case, two hits): kept once; newest first. "toxicologist" in the passage
-    # matches the candidate's field "toxicology"
-    "courtlistener.search_dockets": [cl_docket(12, "2018-01-02"), cl_docket(11, "2021-05-01"),
-                                     cl_docket(11, "2021-05-01")],
+    "courtlistener.search_dockets": [cl_docket(12, "2018-01-02"), cl_docket(11, "2021-05-01")],
     "websearch.search_facts": [
         {"url": "https://example.org/news/rivera", "title": "Expert testifies in example trial",
          "facts": ["Testified for the plaintiff in a 2020 example trial"], "snippet": "SYNTHETIC-WEB-SNIPPET"},
@@ -261,8 +257,7 @@ RESEARCH_SOURCES = {
                                "excltype": "1128a1", "excldate": "20200101", "reindate": "", "state": "OH",
                                "url": "https://exclusions.oig.hhs.gov/"}],
     "firecrawl.scrape": scrape_page,
-    "courtlistener.find_case": find_case,
-    # Court filings of a found case (app/tools/court_files.py): none by default; tests set their own.
+    # Court filings (court_filings, court_file): none by default; tests set their own.
     "courtlistener.docket_documents": ([], False),  # (filings, more left unlisted)
     "courtlistener.document_text": "",
     "courtlistener.download_document": AssertionError("unexpected download in a research test"),
@@ -290,7 +285,7 @@ def research_sources_fixture(monkeypatch):
                 result = _value(*args, **kwargs) if callable(_value) else copy.deepcopy(_value)
                 return await result if inspect.isawaitable(result) else result
 
-            monkeypatch.setattr(MODULES[module], func, fake, raising=False)  # find_case may be new
+            monkeypatch.setattr(MODULES[module], func, fake, raising=False)
         return calls
 
     return setup
