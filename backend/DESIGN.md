@@ -717,7 +717,7 @@ One `Ctx` per research job, made by `app/main_agent.py`.
 | `ctx.save_file(url, data, mime, text=None) -> file_id` | Stores downloaded bytes in `data/files/<dossier_id>/<file_id>.<ext>` and, if given, a text version (`<file_id>.md`) for tools 4, 5, 8. Checks `fetch_ok(url)`, at most 20 MB per file, 30 files per job. Adds a `files` row. |
 | `ctx.file_text(file_id, max_chars=60_000) -> str` | The text version of a saved file ("" if none). Only for files of this dossier. |
 | `await ctx.ask_model(instructions, input, schema=None)` | One model call (`llm.call_model`). Every string in the answer that copies 40+ characters from `input` is dropped, and strings are cut to 500 chars (or the schema's `maxLength`). Use it for any model-written text that will be stored. |
-| `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6)` | A small ADK agent (`llm.make_agent` + `llm.run_agent`) for tools that are agents. `tools` are names of registered tools; their calls go through the same wrapper, caps and activity log. Timeout = time left. Returns `AgentRun`. |
+| `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6)` | A small ADK agent (`llm.make_agent` + `llm.run_agent`) for tools that are agents. `tools` are names of registered tools (also `@tool(..., main=False)` ones, which only helpers get); their calls go through the same wrapper, caps and activity log, but leave the automatic profile update to the calling tool's own call. Timeout = time left. Returns `AgentRun`. |
 | `await ctx.call_tool(tool_name, **args) -> dict` | Calls another registered tool through the wrapper (example: tool 8 calls `ask_pdf`). |
 | `ctx.log(text)` | Sets this call's activity `detail` (cut to 200 chars). Code-made text only: counts, reasons. Never page, snippet or model text. |
 
@@ -869,18 +869,34 @@ CAPTCHA bypass, IP rotation or fake accounts), 8 (no real people's data in the r
 synthetic), 15 (no snippet or page text stored). Caps are per job, starting values.
 
 **Tool 1: court records (core, M7; agent-driven since 2026-11-02).** File `app/tools/courtlistener.py`.
-Four tools; the main agent searches, picks filings to read and decides itself whether a case is the
-expert's (user decision 2026-11-02: no code drop or score; the old `court_records`, `court_case` and
-the automatic filing check are gone). Cases and filings shown to the agent are kept in `Run.cases` /
-`Run.filings`, so later calls take their ids.
-- `court_search(words: str = "", case_name: str = "")`: label "Court search", cap 5. One RECAP search
-  (`courtlistener.search_dockets`, `type=r`): the expert's full-name phrases always (gotcha 13), AND
-  the agent's `words` (field, group and wildcard syntax removed) and the case name's party key words
-  (`case_name_query`), each at most 200 characters. First page (20 cases), CourtListener's order.
-  Each case: docket_id, case name, court, docket number, date filed, nature of suit, `named_as`
-  (party/lawyer), up to 3 matched `filings` (document_id, title, pages, `available`, `passage` = the
-  search snippet) and `more_matched_filings`. Cut to fit `RESULT_MAX` (`not_shown`). Saves nothing;
-  gap only when the plain search finds no case.
+The main agent calls `court_research`; a court-records helper (`ctx.sub_agent`, user decision
+2026-11-02) does the CourtListener work with four helper-only tools (`@tool(main=False)`) plus
+`ask_pdf`: it searches, sorts out people with the same name, reads filings and decides itself
+whether a case is the expert's (no code drop or score; the old `court_records`, `court_case` and
+the automatic filing check are gone). Cases and filings shown to the helper are kept in `Run.cases`
+/ `Run.filings`, so later calls take their ids.
+- `court_research(focus: str = "", context: str = "")`: label "Court research", cap 3. `focus` (at
+  most 500 characters): what to look for, empty = every federal case naming the expert; `context` (at
+  most 3,000): what the main agent knows that is not in the profile yet (e.g. a CV's case list). Runs
+  the helper (`HELPER_INSTRUCTIONS`, at most 40 model calls) on `known_so_far` + focus + context.
+  Reply (code-made from what was saved, cut to `RESULT_MAX` by `fit_report`): `cases` (the helper's
+  verdicts that are not ruled out: ref, case, court, docket number, date, level, role, why,
+  file_ids), `ruled_out` (case names), `files` downloaded (file_id, title, case, name_on_pages),
+  `unjudged`, and `report`: the helper's final text (cases, ruled out, leads outside CourtListener,
+  what it searched). A helper model error is a gap; what it saved still counts. The helper's own tool
+  calls skip the automatic profile update; `court_research`'s call updates it once.
+- `court_search(words: str = "", case_name: str = "", more: bool = False)`: label "Court search", cap 5.
+  One RECAP search (`courtlistener.search_dockets`, `type=r`): the expert's full-name phrases always
+  (gotcha 13), AND the agent's `words` (field, group and wildcard syntax removed) and the case name's
+  party key words (`case_name_query`), each at most 200 characters. Words only filter the name-only
+  results (every word must appear), so the helper reads every page of the plain search and narrows
+  only when `total` is over 100 (Peter Crosby: 27 cases in all; ten word searches found only cases
+  already among them). Reply: `total`, `cases` cut to fit `RESULT_MAX`, `more`; `more=true` shows the
+  rest of the page from `Run.searches` (no call), then the next page via the `next` link (one call,
+  checked to stay on the API). Each case: docket_id, case name, court, docket number, date filed,
+  nature of suit, `named_as` (party/lawyer), up to 3 matched `filings` (document_id, title, pages,
+  `available`, `passage` = the search snippet) and `more_matched_filings`. Saves nothing; gap only
+  when the plain search finds no case.
 - `court_filings(docket_id: int)`: label "Court case filings", cap 5. A known case's public filings
   (`docket_documents`, query `docket_id:<n> AND is_available:true`, first 100, one call per 20; more ->
   gap and `more_not_listed`): document_id, title, number, date filed, pages.

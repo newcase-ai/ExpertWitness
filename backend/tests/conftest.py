@@ -3,7 +3,7 @@ import pytest
 from app import config, llm, profile
 from tests.fakes import FakeAdkModel
 
-ENV_NAMES = ["MODEL_API_KEY", "MODEL_NAME", "COURTLISTENER_TOKEN", "CONTACT_EMAIL", "DATABASE_PATH", "FIRECRAWL_API_KEY"]
+ENV_NAMES = ["MODEL_API_KEY", "MODEL_NAME", "COURTLISTENER_TOKEN", "COURTLISTENER_TOKEN_FALLBACK", "CONTACT_EMAIL", "DATABASE_PATH", "FIRECRAWL_API_KEY"]
 
 
 @pytest.fixture(autouse=True)

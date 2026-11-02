@@ -27,14 +27,11 @@ findings. Read it (read_profile) before asking a file or choosing what to search
 open leads. When you are not sure a result is about this expert, check it (check_against_profile):
 a shared name is not proof.
 
-Federal court records (CourtListener): court_search finds cases whose filings name the expert in
-full; add words or a case name to narrow it. Many people share a name, so judge each case yourself.
-Read the passages; for a case that may be the expert's, download the filings that matched
-(court_file; court_filings lists all of a case's filings, e.g. to find their own report) and read
-the pages that name them with ask_pdf to learn who the person is and their role. Record your
-decision with court_verdict as soon as you know it, before you move on, for every case you looked
-into, also when it is someone else: only a verdict is saved, and a case not recorded when the run
-stops is lost.
+Federal court records (CourtListener): court_research does this work for you. Its helper searches,
+sorts out people with the same name, reads the filings and saves each case it judges; it replies
+with the cases, the files it downloaded and leads to follow. Call it once early with no focus, and
+again with `focus` naming federal cases you found elsewhere (a CV, a web page), giving in `context`
+what you know that is not in the profile yet (e.g. the CV's case list and the expert's side in each).
 
 Download each PDF worth reading (a CV, a deposition or trial transcript, an expert report, a
 court filing, a fee schedule) with download_file. Every new file then gets read with ask_pdf, about
@@ -47,8 +44,8 @@ for (case names and numbers, courts, states, dates, parties, lawyers, other form
 employers, licences)? Go on to the next pages while the file keeps giving something new.
 
 Use every new piece of information, from a file or any other tool, to find more. For a case name
-or number, look the case up: court_search with case_name for a federal case, the state's court sites
-(below) for a state case. Then search the web and the court's own site (firecrawl_search, web_search) for where
+or number, look the case up: court_research for a federal case, the state's court sites (below) for
+a state case. Then search the web and the court's own site (firecrawl_search, web_search) for where
 and when it was heard, the parties, the expert's side and role, rulings on their testimony, fees,
 transcripts and news. For a state where the expert testified, worked or holds a licence, find that
 state's court, licence and discipline sites (sites_for_state), learn how to search each one you
@@ -76,7 +73,7 @@ def first_message(expert: Candidate, testimony_list: str | None) -> str:
     lines += [f"- {e.title} ({e.url})" for e in expert.evidence]
     if testimony_list:
         lines += ["", "Cases the user listed (pasted text, not checked):", testimony_list]
-    lines += ["", "Tools:"] + [f"- {name}: {t.label}" for name, t in REGISTRY.items()]
+    lines += ["", "Tools:"] + [f"- {name}: {t.label}" for name, t in REGISTRY.items() if t.main]
     return "\n".join(lines)
 
 
@@ -86,7 +83,8 @@ async def research(job_id: str, dossier_id: str, expert: Candidate,
     caps = {name: t.cap * config.TOOL_CAP_SCALE for name, t in REGISTRY.items()}
     run = Run(seconds=config.RESEARCH_SECONDS, caps=caps)
     ctx = Ctx(job_id=job_id, dossier_id=dossier_id, expert=expert, run=run)
-    agent = llm.make_agent("main_agent", INSTRUCTIONS, tools=[ctx.adk_tool(name) for name in REGISTRY])
+    agent = llm.make_agent("main_agent", INSTRUCTIONS,
+                           tools=[ctx.adk_tool(name) for name, t in REGISTRY.items() if t.main])
     message = first_message(expert, testimony_list)
     # the pasted testimony list is never stored, except in a DEBUG_TRACE run
     shown = message if trace.full() or not testimony_list else first_message(

@@ -204,6 +204,11 @@ def cl_filing(did, n=2, passage="Exhibit 2: the claim was reviewed by Dr. Alex J
             "url": f"https://www.courtlistener.com/docket/{did}/{n}/doe-v-example/", "passage": passage}
 
 
+def cl_page(hits, total=None, next_url=None):
+    """courtlistener.search_dockets' reply: (dockets, total, next page link)."""
+    return hits, len(hits) if total is None else total, next_url
+
+
 def cl_docket(did, date, court="District Court, N.D. Example", named_as=(), documents=None):
     """A RECAP docket as courtlistener.search_dockets returns it (synthetic)."""
     return {"url": f"https://www.courtlistener.com/docket/{did}/doe-v-example/", "docket_id": did,
@@ -241,7 +246,7 @@ def model_reply(instructions, input, schema=None, web_search=False, output_type=
 
 
 RESEARCH_SOURCES = {
-    "courtlistener.search_dockets": [cl_docket(12, "2018-01-02"), cl_docket(11, "2021-05-01")],
+    "courtlistener.search_dockets": cl_page([cl_docket(12, "2018-01-02"), cl_docket(11, "2021-05-01")]),
     "websearch.search_facts": [
         {"url": "https://example.org/news/rivera", "title": "Expert testifies in example trial",
          "facts": ["Testified for the plaintiff in a 2020 example trial"], "snippet": "SYNTHETIC-WEB-SNIPPET"},

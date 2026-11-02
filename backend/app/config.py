@@ -20,6 +20,7 @@ class Settings:
     contact_email: str | None
     database_path: str
     firecrawl_api_key: str | None = None
+    courtlistener_token_fallback: str | None = None  # used only when the main token is refused (401/403)
     debug_trace: bool = False  # DEBUG_TRACE=1: the run trace keeps everything in full (local testing only)
 
 
@@ -58,5 +59,6 @@ def get_settings() -> Settings:
         contact_email=value("CONTACT_EMAIL"),
         database_path=value("DATABASE_PATH") or DEFAULT_DATABASE_PATH,
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
+        courtlistener_token_fallback=value("COURTLISTENER_TOKEN_FALLBACK"),
         debug_trace=(value("DEBUG_TRACE") or "").lower() in ("1", "true", "yes"),
     )
