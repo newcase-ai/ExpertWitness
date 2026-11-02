@@ -305,6 +305,24 @@ def test_court_tools_run_through_the_main_agent(tool_ctx, research_sources, adk_
         ("court_search", "Court search", "done"), ("court_verdict", "Court case verdict", "done")]
     assert [f.kind for f in tool_ctx.findings()] == ["court_docket"]
     assert {"court_filings", "court_file"} <= set(adk_model.seen[0].tools_dict)
+    assert gaps(tool_ctx) == []  # searched, nothing downloaded: no unjudged case
+
+
+def test_a_case_read_but_not_judged_is_a_gap_however_the_run_ends(tool_ctx, world, adk_model):
+    """The run stops (here a model error) after a filing was downloaded and before any verdict."""
+    world({"recap/synthetic.11.2.pdf": pdf(OWN)})
+    adk_model.script = [call("court_search"), call("court_file", document_id=1102), RuntimeError("SYNTHETIC down")]
+    asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
+    assert ("main_agent", court.UNJUDGED_GAP.format("Doe v. Example Co. 11")) in gaps(tool_ctx)
+    assert tool_ctx.findings() == []
+
+
+def test_a_judged_case_is_no_gap(tool_ctx, world, adk_model):
+    world({"recap/synthetic.11.2.pdf": pdf(OWN)})
+    adk_model.script = [call("court_search"), call("court_file", document_id=1102),
+                        call("court_verdict", docket_id=11, same_person=5, role="party", why=WHY), "DONE"]
+    asyncio.run(jobs.run_research(tool_ctx.job_id, tool_ctx.dossier_id, EXPERT))
+    assert gaps(tool_ctx) == [] and [f.kind for f in tool_ctx.findings()] == ["court_docket"]
 
 
 # --- shared ---------------------------------------------------------------------------------------

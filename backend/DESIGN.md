@@ -899,6 +899,9 @@ the automatic filing check are gone). Cases and filings shown to the agent are k
   from the case, `match` {score, level, role, reasons, checked_by "agent"}). Level: `high` >= 75
   (confidence high), `medium` >= 40, `low` >= 25 (note "may be another person..."), else `ruled out`
   (note "another person with the same name (ruled out)", so the profile lists it under not_him).
+  The verdict is the only save, so the agent is told to record it as soon as it knows. At the end of
+  every run (DONE, time or step limit, model error) `gap_unjudged` adds a gap "court case X was read
+  but not judged (no court_verdict)" for each case with downloaded filings and no verdict.
 - Memories: profile. Legal: gotchas 5, 11 (no token -> `SourceSkipped`), 13, 15, 23, 53. CourtListener
   budget stays in the source client.
 

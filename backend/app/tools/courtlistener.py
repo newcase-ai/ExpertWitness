@@ -44,6 +44,7 @@ COPIED_WHY = "why copies text from the passages or filings: say it in your own w
 NOT_SAVED = "the verdict was not saved (it looked like a secret): reword why"
 LOW_NOTE = "may be another person with the same name; verify it is the same person"
 RULED_OUT = "another person with the same name (ruled out)"
+UNJUDGED_GAP = "court case {} was read but not judged (no court_verdict)"
 
 
 def level_of(score: int) -> str:
@@ -210,7 +211,8 @@ async def court_verdict(ctx: Ctx, docket_id: int, same_person: int, role: str, w
     reviewer, party, judge, lawyer, other witness, mentioned only, unclear. `why`: one or two
     sentences in your own words naming what matched or conflicted (profession, specialty, employer,
     place, kind of case); never quote the filings. The case is saved with the filings you downloaded
-    from it. One verdict per case: a second call returns the first."""
+    from it. Call it as soon as you have decided, not at the end: a case without a verdict when the
+    run stops is lost. One verdict per case: a second call returns the first."""
     case = ctx.run.cases.get(docket_id)
     if case is None:
         return refuse(UNKNOWN_CASE)
@@ -240,3 +242,13 @@ async def court_verdict(ctx: Ctx, docket_id: int, same_person: int, role: str, w
         return refuse(NOT_SAVED)
     ctx.log(f"{level}, {role}")
     return {"ref": ref, "level": level}
+
+
+def gap_unjudged(ctx: Ctx) -> None:
+    """At the end of a run, however it ended: a gap for each case with downloaded filings but no
+    verdict, so work the agent never recorded is not lost silently."""
+    judged = {f.url for f in ctx.findings("court_docket")}
+    read = dict.fromkeys(d["docket_id"] for d in ctx.run.filings.values() if d.get("file_id"))
+    for case in (ctx.run.cases[n] for n in read):
+        if case["url"] not in judged:
+            ctx.add_gap(UNJUDGED_GAP.format(case["case_name"]))

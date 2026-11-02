@@ -7,6 +7,7 @@ from app.config import get_settings
 from app.evidence import Run
 from app.models import Candidate
 from app.tools import REGISTRY, Ctx
+from app.tools.courtlistener import gap_unjudged
 
 INSTRUCTIONS = """You research one expert witness for a lawyer who will depose or cross-examine them,
 or who may hire them. Find as much as you can about their work as an expert: every case and
@@ -30,9 +31,10 @@ Federal court records (CourtListener): court_search finds cases whose filings na
 full; add words or a case name to narrow it. Many people share a name, so judge each case yourself.
 Read the passages; for a case that may be the expert's, download the filings that matched
 (court_file; court_filings lists all of a case's filings, e.g. to find their own report) and read
-the pages that name them with ask_pdf to learn who the person is and their role. Then record your
-decision with court_verdict for every case you looked into, also when it is someone else: only a
-verdict is saved.
+the pages that name them with ask_pdf to learn who the person is and their role. Record your
+decision with court_verdict as soon as you know it, before you move on, for every case you looked
+into, also when it is someone else: only a verdict is saved, and a case not recorded when the run
+stops is lost.
 
 Download each PDF worth reading (a CV, a deposition or trial transcript, an expert report, a
 court filing, a fee schedule) with download_file. Every new file then gets read with ask_pdf, about
@@ -92,4 +94,7 @@ async def research(job_id: str, dossier_id: str, expert: Candidate,
     trace.record("run_start", "main_agent", model=get_settings().model_name, seconds=config.RESEARCH_SECONDS,
                  max_model_calls=config.MAX_AGENT_CALLS, caps=caps, tools=list(REGISTRY),
                  instructions=INSTRUCTIONS, message=shown)
-    return await llm.run_agent(agent, message, max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())
+    try:
+        return await llm.run_agent(agent, message, max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())
+    finally:  # DONE, a limit or a model error: report court cases read but never judged
+        gap_unjudged(ctx)
