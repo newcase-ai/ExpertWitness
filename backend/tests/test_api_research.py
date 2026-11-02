@@ -14,7 +14,7 @@ from app.main import app
 from app.models import Candidate, Finding
 from app.tools import Ctx
 from tests.fakes import PAGE_MARKDOWN, PAGE_TEXT, call, register_tool_fixture  # noqa: F401 - fixture
-from tests.test_api import wait_for_job
+from tests.test_api_search import wait_for_job
 
 PERSON = Candidate(
     display_name="Alex J. Rivera", summary="Synthetic toxicologist.", field="toxicology",

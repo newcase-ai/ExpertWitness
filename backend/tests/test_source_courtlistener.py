@@ -1,13 +1,155 @@
-"""M3 source additions: opinion passages, OpenAlex author/works, web facts. SYNTHETIC data only (gotcha 8)."""
+"""Source client app/sources/courtlistener.py: search, opinion passages, RECAP dockets.
+SYNTHETIC data only (gotcha 8)."""
 
 import asyncio
+import time
 
 import httpx
 import pytest
 
-from app import llm, store
-from app.sources import SourceSkipped, courtlistener, openalex, websearch
-from tests.fakes import FakeModel, sources_fixture  # noqa: F401 - fixture
+from app import http, store
+from app.sources import SourceFailed, SourceSkipped, courtlistener
+from tests.fakes import COURTLISTENER_SEARCH, NAME, sources_fixture  # noqa: F401 - fixture
+
+
+def test_courtlistener_without_token_is_skipped(sources, monkeypatch):
+    _, seen = sources()
+    monkeypatch.delenv("COURTLISTENER_TOKEN")
+    with pytest.raises(SourceSkipped, match="COURTLISTENER_TOKEN is not set"):
+        asyncio.run(courtlistener.search_opinions(NAME))
+    assert seen == []
+
+
+def test_courtlistener_search_uses_full_names_and_token(sources):
+    _, seen = sources()
+    hits = asyncio.run(courtlistener.search_opinions("Alex J. Rivera"))
+    q = seen[0].url.params["q"]
+    near = " OR ".join(f'"Alex Rivera {w}"~5' for w in ("expert", "experts", "Daubert"))
+    assert q == f'("Alex J. Rivera" OR "Alex Rivera") AND ({near})'
+    assert "testif" not in q and "deposition" not in q  # parties and lay witnesses testify too
+    assert "702" not in q  # "702" also matches page cites like "F.2d at 702"
+    assert hits[0]["query"] == "expert" and hits[0]["opinion_id"] == 2
+    assert hits[0]["case"] == ("Doe v. Example Co.", "District Court, N.D. Example", "2019-04-02")
+    assert seen[0].headers["Authorization"] == "Token test-token"
+    assert hits[1]["url"] == "https://www.courtlistener.com/opinion/1/doe-v-example-co/"
+    assert hits[0]["title"] == "Doe v. Example Co."
+    assert "<mark>" not in hits[0]["snippet"]
+
+
+@pytest.mark.parametrize("name", ["Jordan Avery\\", 'Jordan "Avery"', "Jordan* Avery?", "Jordan (Avery)~"])
+def test_courtlistener_query_strips_query_breaking_characters(name):
+    near = " OR ".join(f'"Jordan Avery {w}"~5' for w in ("expert", "experts", "Daubert"))
+    assert courtlistener.build_query(name) == f'("Jordan Avery") AND ({near})'
+
+
+def test_courtlistener_query_adds_unaccented_name():
+    q = courtlistener.build_query("Dr. Søren K. García")
+    assert q.startswith('("Søren K. García" OR "Søren García" OR "Soren K. Garcia" OR "Soren Garcia") AND (')
+    assert '"Søren García expert"~5' in q and '"Soren Garcia Daubert"~5' in q
+    assert q.count('"') % 2 == 0
+
+
+def test_courtlistener_never_searches_surname_alone(sources):
+    _, seen = sources()
+    with pytest.raises(SourceSkipped, match="surname"):
+        asyncio.run(courtlistener.search_opinions("Rivera"))
+    assert seen == []
+
+
+def test_courtlistener_counts_only_real_requests(sources):
+    _, seen = sources()
+    asyncio.run(courtlistener.search_opinions(NAME))
+    asyncio.run(courtlistener.search_opinions(NAME))  # served from the SQLite cache
+    assert len(seen) == 1
+    assert store.calls_since("courtlistener", 3600) == 1
+
+
+@pytest.mark.parametrize("junk", [
+    None, [], "maintenance", {"results": "xx"}, {"results": [{"absolute_url": 5}]},
+    {"results": [5]}, {"detail": "Throttled"},
+])
+def test_courtlistener_junk_is_an_error_and_never_cached(sources, junk):
+    replies = [httpx.Response(200, json=junk), httpx.Response(200, json=COURTLISTENER_SEARCH)]
+    _, seen = sources({"www.courtlistener.com": lambda request: replies.pop(0)})
+    with pytest.raises(RuntimeError, match="unexpected response"):
+        asyncio.run(courtlistener.search_opinions(NAME))
+    hits = asyncio.run(courtlistener.search_opinions(NAME))  # recovered, not stuck on cached junk
+    assert hits[0]["title"] == "Doe v. Example Co."
+    assert len(seen) == 2
+    assert store.calls_since("courtlistener", 3600) == 2
+
+
+def test_courtlistener_odd_fields_do_not_crash(sources):
+    body = {"results": [{"absolute_url": "/opinion/2/x/", "caseName": 7, "opinions": [5, {"snippet": None}]}]}
+    sources({"www.courtlistener.com": (200, body)})
+    hit = asyncio.run(courtlistener.search_opinions(NAME))[0]
+    assert hit["title"] == "Court opinion" and hit["snippet"] == ""
+
+
+def test_courtlistener_retries_a_timeout_once_and_counts_both(sources):
+    def slow(request):
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    _, seen = sources({"www.courtlistener.com": slow})
+    with pytest.raises(SourceFailed) as err:
+        asyncio.run(courtlistener.search_opinions(NAME))
+    assert str(err.value) == courtlistener.TIMED_OUT and "call the tool again" in str(err.value)
+    assert len(seen) == 2 and store.calls_since("courtlistener", 3600) == 2
+    assert seen[0].extensions["timeout"]["read"] == 60  # longer than the other sources' 20 s
+
+
+def test_courtlistener_timeout_then_answer_is_fine(sources):
+    replies = [httpx.ReadTimeout("timed out"), httpx.Response(200, json=COURTLISTENER_SEARCH)]
+
+    def flaky(request):
+        reply = replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    _, seen = sources({"www.courtlistener.com": flaky})
+    assert len(asyncio.run(courtlistener.search_opinions(NAME))) == 2 and len(seen) == 2
+
+
+@pytest.mark.parametrize(("statuses", "requests", "says"), [
+    ((503, 200), 2, None),  # a busy server: retried once, then fine
+    ((502, 502), 2, "server error"),
+    ((429,), 1, "Wait a few minutes"),  # never retried at once
+    ((401,), 1, "token was refused"),
+    ((404,), 1, "will not help"),
+])
+def test_courtlistener_http_errors_say_what_to_do(sources, statuses, requests, says):
+    replies = [httpx.Response(s, json=COURTLISTENER_SEARCH if s == 200 else {}) for s in statuses]
+    _, seen = sources({"www.courtlistener.com": lambda request: replies.pop(0)})
+    if says is None:
+        assert len(asyncio.run(courtlistener.search_opinions(NAME))) == 2
+    else:
+        with pytest.raises(SourceFailed, match=says):
+            asyncio.run(courtlistener.search_opinions(NAME))
+    assert len(seen) == requests
+
+
+def test_courtlistener_timeout_while_waiting_for_its_slot_is_not_counted(sources, monkeypatch):
+    _, seen = sources()
+    limiter = http.RateLimiter(1.0)
+    limiter.last = time.monotonic() + 60  # next slot is a minute away
+    monkeypatch.setattr(http, "limiters", {"courtlistener": limiter})
+
+    async def search():
+        async with asyncio.timeout(0.05):
+            await courtlistener.search_opinions(NAME)
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(search())
+    assert seen == [] and store.calls_since("courtlistener", 3600) == 0
+
+
+def test_courtlistener_daily_cap(sources, monkeypatch):
+    _, seen = sources()
+    monkeypatch.setattr(store, "calls_since", lambda source, seconds: 125)
+    with pytest.raises(SourceSkipped, match="limit"):
+        asyncio.run(courtlistener.search_opinions(NAME))
+    assert seen == []
 
 FILLER = "The court considered the record at length. " * 20
 OPINION_TEXT = (
@@ -196,142 +338,3 @@ def test_opinion_http_error_raises(sources):
     sources(routes={"www.courtlistener.com": (404, {"detail": "Not found."})})
     with pytest.raises(RuntimeError, match="404"):
         asyncio.run(courtlistener.opinion_passages(10, "Alex Rivera"))
-
-
-# --- OpenAlex author and works ------------------------------------------------------------------
-
-AUTHOR = {
-    "id": "https://openalex.org/A0000000001", "display_name": "Alex J. Rivera",
-    "orcid": "https://orcid.org/0000-0000-0000-0001", "works_count": 92, "cited_by_count": 1200,
-    "summary_stats": {"h_index": 18}, "last_known_institutions": [{"display_name": "Example State University"}],
-}
-WORKS = {"results": [
-    {"id": "https://openalex.org/W1", "title": "Synthetic toxicology study", "publication_year": 2021,
-     "primary_location": {"source": {"display_name": "Journal of Examples"}},
-     "doi": "https://doi.org/10.5555/SYNTH.1", "is_retracted": True, "cited_by_count": 4},
-    {"id": "https://openalex.org/W2", "display_name": "Untitled synthetic work", "publication_year": None,
-     "primary_location": None, "doi": None, "is_retracted": None},
-]}
-
-
-def test_openalex_author_stats(sources, monkeypatch):
-    monkeypatch.setattr(openalex, "_budget", None)
-    _, seen = sources(routes={"api.openalex.org": (200, AUTHOR)})
-    assert asyncio.run(openalex.author("https://openalex.org/A0000000001")) == {
-        "id": "A0000000001", "url": "https://openalex.org/A0000000001", "display_name": "Alex J. Rivera",
-        "works_count": 92, "cited_by_count": 1200, "h_index": 18, "orcid": "0000-0000-0000-0001",
-        "last_institution": "Example State University"}
-    assert seen[0].url.path == "/authors/A0000000001"
-
-
-def test_openalex_works_first_page_newest_first(sources, monkeypatch):
-    monkeypatch.setattr(openalex, "_budget", None)
-    _, seen = sources(routes={"api.openalex.org": (200, WORKS)})
-    works = asyncio.run(openalex.works("A0000000001", limit=50))
-    assert seen[0].url.params["filter"] == "author.id:A0000000001"
-    assert seen[0].url.params["sort"] == "publication_year:desc"
-    assert seen[0].url.params["per_page"] == "50" and "cursor" not in seen[0].url.params
-    assert works[0] == {"id": "W1", "title": "Synthetic toxicology study", "year": 2021,
-                        "venue": "Journal of Examples", "doi": "10.5555/synth.1",
-                        "url": "https://doi.org/10.5555/synth.1", "is_retracted": True, "cited_by_count": 4}
-    assert works[1]["doi"] is None and works[1]["url"] == "https://openalex.org/W2"
-    assert works[1]["title"] == "Untitled synthetic work" and works[1]["is_retracted"] is False
-
-
-def test_openalex_bad_id_and_budget(sources, monkeypatch):
-    _, seen = sources()
-    with pytest.raises(ValueError):
-        asyncio.run(openalex.works("A1,author.id:A2"))
-    monkeypatch.setattr(openalex, "_budget", (openalex._today(), 0.0))
-    with pytest.raises(SourceSkipped):
-        asyncio.run(openalex.author("A0000000001"))
-    assert seen == []
-
-
-# --- Web search facts ---------------------------------------------------------------------------
-
-SNIPPET = "SYNTHETIC-WEB-SNIPPET Alex J. Rivera holds an active medical licence in Ohio since the year 2004 per board"
-FACT_RESULTS = [
-    {"url": "https://board.example.gov/lookup/rivera", "title": "Alex J. Rivera - licence record", "snippet": SNIPPET},
-    {"url": "https://www.linkedin.com/in/alex-rivera", "title": "Alex Rivera | LinkedIn", "snippet": "blocked"},
-    {"url": "https://news.example.com/other", "title": "Local news", "snippet": "A different Alex Morgan story"},
-]
-FACT_RESULTS_2 = [
-    {"url": "https://board.example.gov/lookup/rivera", "title": "duplicate", "snippet": SNIPPET},
-    {"url": "https://example.org/certified/alex-rivera", "title": "Alex Rivera, board certified",
-     "snippet": "SYNTHETIC-WEB-SNIPPET certification page"},
-]
-FACTS = {"results": [
-    {"ref": "W1", "about_person": True, "facts": [
-        "Holds an Ohio medical licence.", "x" * 300, SNIPPET[22:80], "Licensed since 2004.", "One too many."]},
-    {"ref": "W2", "about_person": False, "facts": ["Not this person."]},
-    {"ref": "W3", "about_person": True, "facts": ["Board certified in toxicology."]},
-    {"ref": "W9", "about_person": True, "facts": ["Made up result."]},
-]}
-
-
-def test_search_facts_filters_and_never_returns_snippets(sources):
-    fake = FakeModel(web=[FACT_RESULTS, FACT_RESULTS_2], json=[FACTS])
-    sources(model=fake)
-    out = asyncio.run(websearch.search_facts("Alex Rivera", ["q1", "q2"], "licences, board certification, discipline"))
-    assert out == [
-        {"url": "https://board.example.gov/lookup/rivera", "title": "Alex J. Rivera - licence record",
-         "facts": ["Holds an Ohio medical licence.", "x" * websearch.FACT_MAX, "Licensed since 2004."]},
-        {"url": "https://example.org/certified/alex-rivera", "title": "Alex Rivera, board certified",
-         "facts": ["Board certified in toxicology."]},
-    ]
-    assert "SYNTHETIC-WEB-SNIPPET" not in repr(out)
-    web_calls = [c for c in fake.calls if c["web_search"]]
-    assert len(web_calls) == 2 and all(c["schema"] is None for c in web_calls)
-    json_call = next(c for c in fake.calls if not c["web_search"])
-    assert json_call["schema"] is websearch.FACT_SCHEMA and "linkedin" not in json_call["input"]
-
-
-def test_search_facts_without_name_in_result_drops_it(sources):
-    fake = FakeModel(web=[[FACT_RESULTS[2]]], json=[{"results": [
-        {"ref": "W1", "about_person": True, "facts": ["Some fact."]}]}])
-    sources(model=fake)
-    assert asyncio.run(websearch.search_facts("Alex Rivera", ["q"], "expert testimony")) == []
-
-
-def test_search_facts_errors(sources):
-    sources(model=FakeModel(web=[llm.ModelError("down"), llm.ModelError("down too")]))
-    with pytest.raises(llm.ModelError, match="^down$"):
-        asyncio.run(websearch.search_facts("Alex Rivera", ["q1", "q2"], "expert testimony"))
-    sources(model=FakeModel(web=[FACT_RESULTS], json=[llm.ModelError("json failed")]))
-    with pytest.raises(llm.ModelError, match="json failed"):
-        asyncio.run(websearch.search_facts("Alex Rivera", ["q"], "expert testimony"))
-    fake = FakeModel(web=[], json=[])
-    sources(model=fake)
-    assert asyncio.run(websearch.search_facts("Alex Rivera", ["q"], "expert testimony")) == []
-    assert all(c["web_search"] for c in fake.calls)  # no results: no fact call
-
-
-def test_search_facts_with_context_uses_notes_and_url_name(sources):
-    """Meta results often have no snippet: facts come from the search notes. A page naming the person
-    in full only in its URL is kept ("Dr. Rivera" in the facts is fine); a same-name other is not."""
-    quote = "has testified in more than forty synthetic exposure cases nationwide"
-    notes = f'SYNTHETIC-NOTES https://experts.example.org/members/77-alex-j-rivera: Dr. Rivera "{quote}".'
-    results = [
-        {"url": "https://experts.example.org/members/77-alex-j-rivera", "title": "Expert profile", "snippet": ""},
-        {"url": "https://law.example.org/team/rivera", "title": "Alex Rivera, attorney", "snippet": ""},
-    ]
-    facts = {"results": [
-        {"ref": "W1", "about_person": True, "facts": ["Dr. Rivera testifies in toxicology cases.", f"He {quote}."]},
-        {"ref": "W2", "about_person": False, "facts": ["A lawyer."]},
-    ]}
-    calls = []
-
-    async def model(instructions, input, schema=None, web_search=False, output_type=None):
-        calls.append((input, web_search))
-        return llm.ModelResult(text=notes, results=results) if web_search else llm.ModelResult(data=facts)
-
-    sources(model=model)
-    out = asyncio.run(websearch.search_facts("Alex J. Rivera", ["q"], "expert testimony",
-                                             context="toxicology, Columbus, OH"))
-    assert out == [{"url": results[0]["url"], "title": "Expert profile",
-                    "facts": ["Dr. Rivera testifies in toxicology cases."]}]  # the quoted copy is dropped
-    (search_input, _), (fact_input, _) = calls
-    assert "Person: Alex J. Rivera (toxicology, Columbus, OH)" in search_input
-    assert "Person: Alex J. Rivera (toxicology, Columbus, OH)" in fact_input and notes in fact_input
-    assert "SYNTHETIC-NOTES" not in repr(out)
