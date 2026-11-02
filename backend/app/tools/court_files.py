@@ -18,7 +18,7 @@ from app.tools import Ctx, short_args
 MAX_CASES_PER_RUN = 10
 LEVELS = ("high", "medium")
 REASON_MAX = 300
-TITLE_SHOWN = 100  # characters of a saved filing's title in the tool reply
+TITLE_SHOWN = 60  # characters of a saved filing's title in the tool reply (court_records may cut more)
 KINDS = ("own_work", "about_testimony", "neither")
 TEXT_LAYER, COURTLISTENER_OCR, LOCAL_OCR = "text layer", "courtlistener ocr", "local ocr"
 # Fixed activity details (never file, title or model text).
@@ -26,6 +26,8 @@ SAVED = {"own_work": "saved: expert's own work", "about_testimony": "saved: abou
 FINDING_DROPPED = "skipped: finding dropped"
 TIME_LIMIT = "skipped: time limit"
 TITLE_NO = "skipped: title not about the expert"
+SEARCH_PICKED = "name found by CourtListener search"  # why a filing skipped the title check
+TITLE_PICKED = "title check"
 NAME_MISSING = "skipped: full name not in the file"
 NOT_ABOUT = "skipped: not about the expert"
 NOT_PDF = "skipped: not a readable PDF"
@@ -57,9 +59,12 @@ expert witness. You get what the research knows about the expert and the case's 
 D2, ...: description, document number, date, page count). Mark a filing likely=true only if its title
 suggests it is the expert's own work (an expert report, declaration, affidavit, deposition transcript,
 CV) or about the expert's testimony (a motion, brief or order to admit, limit or exclude this expert's
-testimony, a Daubert motion about them). Routine filings (complaints, scheduling orders, notices,
-exhibits not tied to an expert, filings about other experts) are likely=false. Give every filing,
-with a short reason in your own words. Use only what you are given."""
+testimony, a Daubert motion about them). For a reviewing, consulting or examining physician (and
+similar experts who review claims or records), the administrative record, claim file, appeal decision
+letters or correspondence, peer reviews, independent medical exams and records reviews often hold
+their opinions: mark those likely=true; they are not routine exhibits. Routine filings (complaints,
+scheduling orders, notices, filings about other experts) are likely=false. Give every filing, with a
+short reason in your own words. Use only what you are given."""
 
 FILE_SCHEMA = {
     "type": "object",
@@ -72,15 +77,23 @@ FILE_INSTRUCTIONS = """You read part of one federal court filing ([Page N] marks
 whether it is about one specific expert witness. You get what the research knows about the expert,
 the case and the filing's title. relevant=true only if this is the expert's own work (their report,
 declaration, affidavit, deposition, CV: kind "own_work") or about their testimony (a motion, brief or
-ruling to admit, limit or exclude this expert: kind "about_testimony"). A filing that only mentions the
+ruling to admit, limit or exclude this expert: kind "about_testimony"). A filing that contains or
+quotes the expert's peer review, records review, independent medical exam or medical opinion (for
+example inside an administrative record or an appeal decision letter) is relevant, kind "own_work".
+A filing that only mentions the
 name, or is about someone else with the same name, is relevant=false with kind "neither". reason: one
 sentence in your own words, never quoting the filing. Professional facts only."""
 
 
-def row(ctx: Ctx, doc: dict, status: str, detail: str) -> None:
-    """One finished activity row for a filing: its title (cut, secrets hidden) and a fixed detail."""
-    store.start_activity(ctx.job_id, "court_file", "Court file",
-                         short_args({"title": doc.get("description") or ""}), status, detail)
+def row(ctx: Ctx, doc: dict, status: str, detail: str, picked: str | None = None) -> None:
+    """One finished activity row for a filing: its title (cut, secrets hidden), why it was picked (fixed
+    text) and a fixed detail."""
+    args = {"title": doc.get("description") or ""} | ({"picked": picked} if picked else {})
+    store.start_activity(ctx.job_id, "court_file", "Court file", short_args(args), status, detail)
+
+
+def same_url(url: str | None) -> str:
+    return (url or "").strip().rstrip("/").lower()
 
 
 def case_line(hit: dict) -> str:
@@ -168,7 +181,7 @@ async def save(ctx: Ctx, hit: dict, same: dict, case_ref: str, doc: dict, tmp, p
     if ref is None:
         return None
     await ctx.keep_file(doc["url"], tmp, "application/pdf", numbered(pages, 1, len(pages)), file_id=file_id)
-    return {"ref": ref, "file_id": file_id, "title": title[:TITLE_SHOWN], "kind": verdict["kind"]}
+    return {"file_id": file_id, "title": title[:TITLE_SHOWN], "pages": doc.get("page_count") or len(pages)}
 
 
 async def check_file(ctx: Ctx, hit: dict, same: dict, case_ref: str, doc: dict,
@@ -222,7 +235,7 @@ async def check_file(ctx: Ctx, hit: dict, same: dict, case_ref: str, doc: dict,
 
 
 async def check_case_files(ctx: Ctx, hit: dict, same: dict, case_ref: str) -> list[dict]:
-    """Plan steps 1-9 for one saved case: [{ref, file_id, title, kind}] of the filings saved. Only for
+    """Plan steps 1-9 for one saved case: [{file_id, title, pages}] of the filings saved. Only for
     a high/medium case with a docket id, each docket once per run, at most MAX_CASES_PER_RUN."""
     docket_id = hit.get("docket_id")
     if (same.get("level") not in LEVELS or not docket_id or docket_id in ctx.run.dockets
@@ -240,22 +253,25 @@ async def check_case_files(ctx: Ctx, hit: dict, same: dict, case_ref: str) -> li
     if not docs:
         return []
     about = known_so_far(ctx)
-    picked = await pick_titles(ctx, hit, docs, about)
-    if picked is None:
-        return []
-    todo = []
-    for i, doc in enumerate(docs, 1):
-        if f"D{i}" in picked:
-            todo.append(doc)
-        else:
-            row(ctx, doc, "skipped", TITLE_NO)
+    # Filings CourtListener's full-text search matched on the name skip the title check (user,
+    # 2026-11-02: titles like "Exhibit B, Appeal Decision Correspondence" were all rejected).
+    found = {same_url(d.get("url")) for d in hit.get("documents") or [] if d.get("url")}
+    todo = [(d, SEARCH_PICKED) for d in docs if same_url(d.get("url")) in found]
+    rest = [d for d in docs if same_url(d.get("url")) not in found]
+    if rest and (picked := await pick_titles(ctx, hit, rest, about)) is not None:
+        for i, doc in enumerate(rest, 1):
+            if f"D{i}" in picked:
+                todo.append((doc, TITLE_PICKED))
+            else:
+                row(ctx, doc, "skipped", TITLE_NO, TITLE_PICKED)
     saved, late = [], 0
-    for n, doc in enumerate(todo):
+    for n, (doc, why) in enumerate(todo):
         if ctx.time_left() <= 0:
             late = len(todo) - n
             break
+        trace.record("court_file", step="picked", doc=doc.get("id"), picked=why)
         status, detail, entry = await check_file(ctx, hit, same, case_ref, doc, about)
-        row(ctx, doc, status, detail)
+        row(ctx, doc, status, detail, why)
         if detail == TIME_LIMIT:
             late = len(todo) - n
             break

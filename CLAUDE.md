@@ -131,4 +131,4 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 57. ruff ASYNC230 flags opening a file in async code: do file work in `asyncio.to_thread`.
 58. `Ctx.keep_file` skips the `API_HOSTS` rule on purpose (court files come from CourtListener): never use it for page fetches (gotcha 40).
 59. A tool reply over `RESULT_MAX` is dropped whole by the wrapper: replies with file or case lists must be capped or cut (`court_records` uses `fit`).
-60. `store.new_id` ids (prefix + 16 hex) can hold 12+ digits in a row and failed the card check (~2% each, so ~1 in 30 court files with two ids in its facts was dropped): `tools.secret` blanks `tools.OWN_IDS` first, only ids with an a-f letter (an all-digit one may hide a card number).
+60. `store.new_id` ids (prefix + 16 hex) could hold 12+ digits in a row and failed the card check (~1 in 30 court files dropped): `new_id` now never returns an all-digit id, and `tools.secret` blanks our ids (`tools.OWN_IDS`, only with an a-f letter, so a card number after a prefix is still caught).

@@ -18,7 +18,6 @@ from app.tools import RESULT_MAX, Ctx, tool
 from app.tools.court_files import check_case_files
 
 MAX_CASES = 10
-FILES_SHOWN = 10  # ponytail: more saved files stay findings (kind court_file), just not in the reply
 STEM = 6  # ponytail: crude stemming, a shared 6-letter prefix counts ("chiropractic" ~ "chiropractor")
 KEEP_SCORE = 25  # full name alone: kept as level "low" (user decision 2026-10-29)
 MEDIUM_SCORE = 40
@@ -183,7 +182,7 @@ async def court_records(ctx: Ctx) -> dict:
     `skipped_same_name` counts cases about someone else with the same name. For high and medium cases
     the case's public filings are checked too: those that are the expert's own work (report,
     declaration, deposition, CV) or about their testimony (a motion or ruling to admit, limit or
-    exclude them) are saved; `files` lists them (ref, file_id, title, kind): read one with ask_pdf."""
+    exclude them) are saved; `files` lists them (file_id, title, pages): read one with ask_pdf."""
     name = ctx.expert.display_name
     hits = await courtlistener.search_dockets(name)
     if not hits:
@@ -221,20 +220,30 @@ async def court_records(ctx: Ctx) -> dict:
         ctx.add_gap(SKIPPED_GAP.format(skipped))
     ctx.log(f"{len(hits)} cases found, {len(cases)} kept, {skipped} same-name skipped"
             + (f" · {against}" if against else "") + (f", {len(files)} files saved" if files else ""))
-    return fit({"cases": cases, "skipped_same_name": skipped, "files": files[:FILES_SHOWN]})
+    return fit({"cases": cases, "skipped_same_name": skipped, "files": files})
 
 
-# Cuts that make a worst-case reply (10 long cases + files) fit: the wrapper drops a longer one whole.
-FIT_CUTS = (("passage", 200), ("why", 150), ("passage", 0), ("case_name", 100), ("why", 0))
+# Cuts that make a worst-case reply (10 long cases, many saved files) fit, in order: (list, key, size;
+# None removes the key). The wrapper drops a longer reply whole; every file is listed if at all possible.
+FIT_CUTS = (("files", "title", 30), ("cases", "passage", 200), ("cases", "why", 150), ("files", "title", None),
+            ("cases", "passage", None), ("cases", "why", None), ("cases", "case_name", 60),
+            ("cases", "court", None), ("cases", "docket_number", None))
 
 
 def fit(reply: dict) -> dict:
-    """`reply` with its cases' passages, reasons and names cut, in FIT_CUTS order, until it fits."""
-    for key, size in FIT_CUTS:
+    """`reply` cut in FIT_CUTS order until it fits RESULT_MAX; as a last resort the last files are left
+    out (`files_not_listed`; ask_pdf's unknown-file error lists every file_id)."""
+    for where, key, size in FIT_CUTS:
         if len(json.dumps(reply)) <= RESULT_MAX:
-            break
-        for case in reply["cases"]:
-            case[key] = (case[key] or "")[:size]
+            return reply
+        for item in reply.get(where) or []:
+            if size is None:
+                item.pop(key, None)
+            elif key in item:
+                item[key] = (item[key] or "")[:size]
+    while len(json.dumps(reply)) > RESULT_MAX and reply.get("files"):
+        reply["files"].pop()
+        reply["files_not_listed"] = reply.get("files_not_listed", 0) + 1
     return reply
 
 
@@ -272,8 +281,8 @@ async def court_case(ctx: Ctx, case_name: str, court: str = "", year: int = 0) -
     not saved. Not found -> {"found": false}. If it fails, its error says whether calling again can help.
     Not for cases court_records already returned: they are checked and saved (a repeat call only
     returns the saved verdict, `already_found`). A saved high or medium case also gets its filings
-    checked: `files` lists the saved ones (the expert's own work or about their testimony; ref,
-    file_id, title, kind): read one with ask_pdf."""
+    checked: `files` lists the saved ones (the expert's own work or about their testimony;
+    file_id, title, pages): read one with ask_pdf."""
     if len(case_name) > CASE_NAME_MAX:
         return refuse("case name too long")
     if found := saved_case(ctx, case_name=case_name):
@@ -305,5 +314,5 @@ async def court_case(ctx: Ctx, case_name: str, court: str = "", year: int = 0) -
         source_type="courtlistener_docket")
     files = await check_case_files(ctx, hit, same, ref) if ref else []
     ctx.log(f"found · {against}" + (f", {len(files)} files saved" if files else ""))
-    return {"found": True, "ref": ref, **record, "same_person": shown(same), "passages": hit["passages"],
-            "files": files[:FILES_SHOWN]}
+    return fit({"found": True, "ref": ref, **record, "same_person": shown(same), "passages": hit["passages"],
+                "files": files})

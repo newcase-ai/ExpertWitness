@@ -138,7 +138,7 @@ def test_title_rejected_is_never_downloaded(tool_ctx, world):
     assert "D1: Scheduling order | doc 1 | filed 2021-05-01 | 3 pages" in fake.prompts[0]
     assert "Name: Alex Rivera" in fake.prompts[0]  # known_so_far is the context
     assert rows(tool_ctx) == [("court_file", "skipped", TITLE_NO)]
-    assert store.activity(tool_ctx.job_id)[0].args == {"title": "Scheduling order"}
+    assert store.activity(tool_ctx.job_id)[0].args == {"title": "Scheduling order", "picked": court_files.TITLE_PICKED}
 
 
 def test_full_name_missing_is_dropped_without_ai(tool_ctx, world, tmp_path):
@@ -167,10 +167,9 @@ def test_ai_yes_saves_the_file_its_text_and_a_finding(tool_ctx, world, tmp_path)
     assert len(fake.prompts) == 4  # D1: batch 1 no, batch 2 yes; D2: yes
     assert "[Page 3]" in fake.prompts[2] and "The filing: Expert report of Alex Rivera (doc 1)" in fake.prompts[2]
     first, second = tool_ctx.findings("court_file")
-    assert saved == [{"ref": first.finding_id, "file_id": first.facts["file_id"], "title": "Expert report of Alex Rivera",
-                      "kind": "own_work"},
-                     {"ref": second.finding_id, "file_id": second.facts["file_id"],
-                      "title": "Motion to exclude the testimony of Alex Rivera", "kind": "about_testimony"}]
+    assert saved == [{"file_id": first.facts["file_id"], "title": "Expert report of Alex Rivera", "pages": 3},
+                     {"file_id": second.facts["file_id"], "title": "Motion to exclude the testimony of Alex Rivera",
+                      "pages": 3}]
     assert (first.url, first.source_type, first.confidence, first.title) == (
         "https://www.courtlistener.com/docket/11/1/doe-v-example/", "courtlistener_document", "high",
         "Expert report of Alex Rivera")
@@ -303,8 +302,7 @@ def test_court_records_reply_lists_saved_files(tool_ctx, world):
     world([filing(1)], fake, {"courtlistener.search_dockets": [cl_docket(11, "2021-05-01")], "llm.call_model": model})
     reply = asyncio.run(run_tool(tool_ctx, "court_records"))
     [saved] = tool_ctx.findings("court_file")
-    assert reply["files"] == [{"ref": saved.finding_id, "file_id": saved.facts["file_id"],
-                               "title": "Expert report of Alex Rivera", "kind": "own_work"}]
+    assert reply["files"] == [{"file_id": saved.facts["file_id"], "title": "Expert report of Alex Rivera", "pages": 3}]
     assert saved.facts["case_ref"] == reply["cases"][0]["ref"] and saved.collector == "court_records"
     assert [r[0] for r in rows(tool_ctx)] == ["court_records", "court_file"]
 
@@ -374,7 +372,9 @@ def test_worst_case_court_records_reply_fits(tool_ctx, world):
                      "llm.call_model": model})
     reply = asyncio.run(run_tool(tool_ctx, "court_records"))
     assert "error" not in reply and len(tool_ctx.findings("court_file")) == 100
-    assert len(reply["cases"]) == 10 and reply["files"] and len(json.dumps(reply)) <= RESULT_MAX
+    assert len(reply["cases"]) == 10 and len(json.dumps(reply)) <= RESULT_MAX
+    listed = {f["file_id"] for f in reply["files"]}  # every saved file listed: none left for the agent to guess
+    assert listed == {f.facts["file_id"] for f in tool_ctx.findings("court_file")} and "files_not_listed" not in reply
 
 
 def test_own_ids_never_look_like_secrets(tool_ctx):
@@ -386,3 +386,67 @@ def test_own_ids_never_look_like_secrets(tool_ctx):
     ref = tool_ctx.add_finding("court_file", "SYNTHETIC filing", "https://www.courtlistener.com/docket/1/2/x/",
                                facts={"file_id": "file_1234567890123a56", "case_ref": "fnd_9876543210987b54"})
     assert ref and tool_ctx.findings()[0].facts["file_id"] == "file_1234567890123a56"
+
+
+def searched(did=11, n=1):
+    """A docket whose search hit matched filing n on the full name (the hit's documents hold its URL)."""
+    hit = cl_docket(did, "2021-05-01")
+    hit["documents"][0]["url"] = filing(n)["url"].upper() + "/"  # normalized before comparing
+    return hit
+
+
+def test_search_matched_filing_skips_the_title_check(tool_ctx, world):
+    """CourtListener's full-text search found the name in filing 2: downloaded first, never in the title
+    prompt; the full file check (name + AI) still runs."""
+    fake = Fake({"recap/synthetic.2.pdf": pdf(OWN)}, {"D1": False}, [yes()])
+    world([filing(1, "Scheduling order"), filing(2, "Exhibit B, Appeal Decision Correspondence")], fake)
+    saved = check(tool_ctx, hit=searched(n=2))
+    title_prompt = fake.prompts[0]
+    assert "D1: Scheduling order" in title_prompt and "Appeal Decision" not in title_prompt
+    assert [d.name for d in fake.downloads] == ["902.pdf"] and len(saved) == 1
+    assert [(a.args.get("picked"), a.detail) for a in store.activity(tool_ctx.job_id)] == [
+        (court_files.TITLE_PICKED, TITLE_NO), (court_files.SEARCH_PICKED, SAVED["own_work"])]
+
+
+def test_title_call_skipped_when_all_filings_are_search_matched(tool_ctx, world):
+    fake = Fake({"recap/synthetic.1.pdf": pdf(OTHER)}, {})
+    world([filing(1)], fake)
+    assert check(tool_ctx, hit=searched(n=1)) == []
+    assert fake.prompts == [] and len(fake.downloads) == 1  # name check drops it before any AI call
+    assert rows(tool_ctx) == [("court_file", "skipped", NAME_MISSING)]
+
+
+def test_search_matched_filing_is_checked_when_the_title_check_fails(tool_ctx, world):
+    fake = Fake({"recap/synthetic.2.pdf": pdf(OWN)}, {}, [yes()])
+    titles_down = llm.ModelError("model call failed (RuntimeError)")
+
+    def model(instructions, input, schema=None, **kw):
+        if schema is TITLE_SCHEMA:
+            raise titles_down
+        return fake.model(instructions, input, schema)
+
+    world([filing(1), filing(2)], fake, {"llm.call_model": model})
+    assert len(check(tool_ctx, hit=searched(n=2))) == 1
+
+
+def test_instructions_cover_reviewing_physicians():
+    assert "appeal decision letters or correspondence, peer reviews, independent medical exams" in \
+        court_files.TITLE_INSTRUCTIONS.replace("\n", " ")
+    assert "they are not routine exhibits" in court_files.TITLE_INSTRUCTIONS.replace("\n", " ")
+    assert ("quotes the expert's peer review, records review, independent medical exam or medical opinion"
+            in court_files.FILE_INSTRUCTIONS.replace("\n", " "))
+
+
+def test_new_ids_are_never_all_digits(monkeypatch):
+    """gotcha 60: an all-digit id looks like a card number; store.new_id draws again."""
+    tokens = iter(["4111111111111111", "0123456789abcdef"])
+    monkeypatch.setattr(store.secrets, "token_hex", lambda n: next(tokens))
+    assert store.new_id("file") == "file_0123456789abcdef"
+
+
+def test_fit_lists_files_before_case_details():
+    from app.tools.courtlistener import fit
+    files = [{"file_id": f"file_{n:015x}a", "title": "SYNTHETIC title " * 4, "pages": 3} for n in range(200)]
+    reply = fit({"cases": [{"case_name": "x" * 200, "passage": "y" * 400, "why": "z"}], "files": files})
+    assert len(json.dumps(reply)) <= RESULT_MAX and reply["files_not_listed"] > 0  # too many: the last are left out
+    assert "passage" not in reply["cases"][0] and "title" not in reply["files"][0]

@@ -886,8 +886,11 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   tool saves a case of level high or medium, `check_case_files` checks its RECAP filings. At most 10
   dockets per run (`MAX_CASES_PER_RUN`, `Run.dockets`), each once. Steps: list the public filings
   (`courtlistener.docket_documents`, query `docket_id:<n> AND is_available:true`, first 100; more ->
-  gap); one AI title check per case (context `known_so_far`) picks the likely ones (the expert's own
-  report, declaration, affidavit, deposition, CV, or a motion/order to admit, limit or exclude them);
+  gap); filings the search hit already matched on the full name (`hit["documents"]`) skip the title
+  check and go first (activity arg `picked: name found by CourtListener search`); one AI title check
+  per case for the rest (context `known_so_far`, skipped if none are left) picks the likely ones (the
+  expert's own report, declaration, affidavit, deposition, CV; for reviewing physicians also claim
+  files, appeal decision letters, peer reviews, IMEs; or a motion/order to admit, limit or exclude them);
   each picked filing is streamed to `data/files/<dossier>/tmp/`; text in this order: pypdf text layer,
   CourtListener's own OCR text (`document_text`), local OCR (RapidOCR on pypdfium2 pages, until the
   run's time is up). Code then needs the full name in the text (gotcha 13; no AI call otherwise); the
