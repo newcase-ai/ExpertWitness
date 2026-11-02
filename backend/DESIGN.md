@@ -1,7 +1,8 @@
 # Expert Witness Research API: Design (Milestone 1)
 
 Status: draft for the user's review, 2026-10-28. No code yet.
-Read with `PLAN.md` (goal, rules, gotchas) and `SOURCES_AND_FLOW.md` (sources and legal rules).
+Read with the team's private notes `PLAN.md` (goal, rules, gotchas) and `SOURCES_AND_FLOW.md`
+(sources and legal rules); both are kept out of git. The numbered gotchas are copied into the root `CLAUDE.md`.
 Every outside fact has a link. "Not verified" means we could not confirm it on an official page.
 JSON examples use a made-up person ("Alex Rivera") and placeholder ids; they are not sources.
 
@@ -1145,7 +1146,7 @@ chains many sources into one answer is less dependable today", so we send short,
 
 ## 7. Sources used in v1 (1e)
 
-Source of truth: `SOURCES_AND_FLOW.md` ("Sources: current list" and "v1 sources: API details").
+Source of truth: the private `SOURCES_AND_FLOW.md` (not in git; "Sources: current list" and "v1 sources: API details").
 All five are marked automated use "Yes" there.
 
 | Source | Used for | Limits | Link |
@@ -1172,37 +1173,39 @@ Excluded from v1:
 | Dennis D. Weisenburger (hematopathologist) | *Hardeman v. Monsanto*, 9th Cir. Nos. 19-16636/19-16708 (May 14, 2021) reviews Daubert rulings on "Dr. Weisenburger" (surname only); split over 4 OpenAlex ids. | [9th Cir. opinion](https://cdn.ca9.uscourts.gov/datastore/opinions/2021/05/14/19-16636.pdf), [FERN, full name](https://thefern.org/ag_insider/roundup-case-federal-judge-vets-experts-testimony/amp/) |
 | John Smith (common name) | OpenAlex author search returns 1,236 authors (2026-10-28) | [OpenAlex search](https://api.openalex.org/authors?search=John%20Smith) |
 
-## 9. Module layout for M2-M4
+## 9. Module layout (current)
 
-Few files, so builders can own disjoint ones:
+Updated in the repo cleanup (2026-11-02); which milestone built each file is in the git history.
 
-| File | Contents | Milestone |
-| --- | --- | --- |
-| `app/main.py` | FastAPI app and the 7 endpoints (thin: validate, call store/jobs); M2 adds health, candidate search and `GET /jobs/{id}` | M2-M4 |
-| `app/config.py` | Read `.env` into one settings object | M2 |
-| `app/models.py` | Pydantic shapes: requests, Candidate, Job, Dossier, Finding, Source | M2 (Dossier M4) |
-| `app/http.py` | Shared httpx client, per-source rate limiter, URL cache | M2 |
-| `app/llm.py` | `call_model` wrapper (section 5) | M2 |
-| `app/sources/courtlistener.py` | search, opinion fetch, hour/day counters | M2 |
-| `app/sources/openalex.py` | author search, author by id, works | M2 |
-| `app/sources/crossref.py` | retraction flags by DOI | M3 |
-| `app/sources/leie.py` | CSV download and name match | M3 |
-| `app/sources/websearch.py` | Meta web search call, blocked-domain filter | M2 |
-| `app/agents.py` | candidate finder, dossier writer, citation filter | M2, M4 |
-| `app/collectors.py` | testimony, publications and credentials collectors (findings + gaps) | M3 |
-| `app/jobs.py` | start job (`asyncio` task in the same process), step updates, restart cleanup; needed in M2 because candidate search is a job | M2 (research jobs reuse it in M3) |
-| `app/store.py` | SQLite (stdlib `sqlite3`): jobs, searches, candidates, cache, counters in M2; findings, dossiers in M3-M4 | M2-M4 |
-| `tests/fakes.py` | `FakeModel`, `httpx.MockTransport` fixtures, synthetic people only | M2 |
-| `tests/test_*.py` | one file per module | M2-M4 |
+| File | Contents |
+| --- | --- |
+| `app/main.py` | FastAPI app and the 10 endpoints (thin: validate, call store/jobs) |
+| `app/config.py` | Settings from `.env` and the environment; `DATA_DIR` is `backend/data` |
+| `app/models.py` | Pydantic shapes: requests, Candidate, Job, Dossier, Finding, Source |
+| `app/http.py` | Shared httpx client, per-source rate limiter, URL cache |
+| `app/llm.py` | The one door to the Meta Model API: ADK model factory, agent runner, `call_model` |
+| `app/candidate_agent.py` | Candidate finder (4.1, 4A) |
+| `app/research_agent.py` | The main research agent (4B.5); its step key is still `main_agent` |
+| `app/evidence.py` | Copy-check helpers and the per-run evidence store (4A.4-4A.5) |
+| `app/jobs.py` | Background jobs: `asyncio` task in the same process, step updates |
+| `app/store.py` | SQLite (stdlib `sqlite3`): every table |
+| `app/memory.py` | Long-term memories of the main agent (4B.4) |
+| `app/profile.py` | The expert profile of a research run |
+| `app/trace.py` | Run trace of a research job |
+| `app/sources/*.py` | Raw source clients (HTTP, rate limits, cache): courtlistener, openalex, crossref, leie, websearch, firecrawl, firecrawl_search; shared helpers in `__init__.py` |
+| `app/tools/*.py` | Main agent tools (4B.9); registry, wrapper and `Ctx` in `__init__.py` |
+| `tests/fakes.py`, `tests/conftest.py` | `FakeModel`, `FakeAdkModel`, `httpx.MockTransport` fixtures; synthetic people only |
+| `tests/test_source_*.py`, `test_tool_*.py`, `test_api_*.py` | One file per source client, per tool and per API area; the rest one per module |
 
-Files under `data/` (SQLite file, LEIE CSV) are gitignored.
+Files under `backend/data/` (SQLite file, saved downloads, LEIE CSV) are gitignored.
 
 `.env.example` names (empty values):
 - `MODEL_API_KEY`: Meta Model API key (name used in Meta's docs).
 - `MODEL_NAME`: defaults to `muse-spark-1.3`; code refuses any name ending in `-contributor`.
 - `COURTLISTENER_TOKEN`: CourtListener API token.
 - `CONTACT_EMAIL`: optional; sent as Crossref `mailto` only when set (open question in PLAN.md).
-- `DATABASE_PATH`: defaults to `data/expert_witness.db`.
+- `DATABASE_PATH`: defaults to `backend/data/expert_witness.db` (worked out from the code's location,
+  not the folder the server starts in).
 
 ## 10. Open risks and not verified
 
