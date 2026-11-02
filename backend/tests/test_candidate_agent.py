@@ -4,7 +4,7 @@ import copy
 import httpx
 import pytest
 
-from app import agents, llm
+from app import candidate_agent, llm
 from app.models import Candidate
 from app.sources import courtlistener
 
@@ -38,7 +38,7 @@ class Steps:
 
 def run(name=NAME, hints=None):
     steps = Steps()
-    candidates, failed = asyncio.run(agents.find_candidates(name, hints, steps))
+    candidates, failed = asyncio.run(candidate_agent.find_candidates(name, hints, steps))
     return candidates, failed, steps
 
 
@@ -73,7 +73,7 @@ def test_find_candidates_groups_merges_and_cites(sources):
         assert "SYNTHETIC-WEB-SNIPPET" not in dumped and "SYNTHETIC-CL-SNIPPET" not in dumped
 
     group_call = model.calls[-1]
-    assert group_call["schema"] is agents.GROUP_SCHEMA and group_call["web_search"] is False
+    assert group_call["schema"] is candidate_agent.GROUP_SCHEMA and group_call["web_search"] is False
     assert "E5 [web]" in group_call["input"] and "linkedin" not in group_call["input"]
     assert "E7 [web]" in group_call["input"] and "E8 [web]" not in group_call["input"]  # repeat URL
     assert "found by: name search" in group_call["input"]
@@ -125,7 +125,7 @@ def test_ai_text_is_capped_and_copied_snippet_text_dropped(sources):
     person["evidence"][3]["note"] = "copied: " + snippet
     sources(model=FakeModel(web=[WEB_RESULTS], json=[{"people": [person]}]))
     tox = run()[0][0]
-    assert tox.summary == agents.SUMMARY_REMOVED
+    assert tox.summary == candidate_agent.SUMMARY_REMOVED
     assert len(tox.location) == 120 and len(tox.match_notes) <= 400
     assert tox.affiliations == ["Example State University"]
     web = next(e for e in tox.evidence if e.source == "web")
@@ -148,7 +148,7 @@ def test_failed_and_skipped_sources_are_reported_not_raised(sources, monkeypatch
 
 def test_slow_source_times_out(sources, monkeypatch):
     sources(model=FakeModel(json=[{"people": []}], hang=True))
-    monkeypatch.setattr(agents, "SOURCE_TIMEOUT", 0.05)
+    monkeypatch.setattr(candidate_agent, "SOURCE_TIMEOUT", 0.05)
     _, failed, _ = run()
     assert [(f.source, f.reason) for f in failed] == [("web_search", "timed out")]
 
@@ -157,8 +157,8 @@ def test_grouping_failure_raises_with_all_failed_sources(sources):
     sources({"www.courtlistener.com": (500, {})},
             model=FakeModel(web=[WEB_RESULTS], json=[llm.ModelError("model returned invalid output")]))
     steps = Steps()
-    with pytest.raises(agents.FindCandidatesError, match="AI grouping step failed") as err:
-        asyncio.run(agents.find_candidates(NAME, None, steps))
+    with pytest.raises(candidate_agent.FindCandidatesError, match="AI grouping step failed") as err:
+        asyncio.run(candidate_agent.find_candidates(NAME, None, steps))
     assert [(f.source, f.reason) for f in err.value.failed_sources] == [
         ("courtlistener", courtlistener.failure(500)),
         ("group_candidates", "model returned invalid output"),
@@ -203,7 +203,7 @@ def test_dedupe_keeps_different_cases_and_hits_without_full_case_data():
     hits = [courtlistener.to_hit(o) for o in (
         opinion(3), opinion(2) | {"dateFiled": "2020-01-01"}, opinion(1),
         opinion(5) | {"dateFiled": ""}, opinion(4) | {"dateFiled": ""})]
-    kept = [h["opinion_id"] for h in agents.dedupe_cases(hits)]
+    kept = [h["opinion_id"] for h in candidate_agent.dedupe_cases(hits)]
     assert kept == [2, 1, 5, 4]  # 3 and 1 are one case; a different date or no date is kept
 
 
@@ -233,7 +233,7 @@ def test_experts_take_the_capped_slots_first(sources):
     people = [person(["E7"], summary=f"clinic {i}") for i in range(12)] + [person(["E6"], summary="directory")]
     sources(model=FakeModel(web=[WEB_RESULTS, WEB_NAME_RESULTS], json=[{"people": people}]))
     candidates, _, _ = run()
-    assert len(candidates) == agents.MAX_CANDIDATES
+    assert len(candidates) == candidate_agent.MAX_CANDIDATES
     assert candidates[0].summary == "directory" and not candidates[1].expert_evidence
 
 
@@ -282,7 +282,7 @@ def test_without_field_or_location_hint_tiers_decide(sources):
 def test_hint_words(hint, location, field, matches):
     cand = Candidate(display_name="Alex Rivera", summary="x", location=location, field=field,
                      evidence=[{"source": "web", "url": "https://example.com", "title": "Alex Rivera, MD"}])
-    assert agents.hint_matches(cand, hint) == matches
+    assert candidate_agent.hint_matches(cand, hint) == matches
 
 
 def test_accented_names_match_unaccented_search(sources):
@@ -374,11 +374,11 @@ def test_listing_merge_needs_a_shared_field_or_website(sources, urls, field, gro
     ("https://riveraconsulting.example/", []),
 ])
 def test_expert_witness_domains_earn_the_web_signal(url, signals):
-    assert agents.expert_signals([{"source": "web", "url": url, "title": "Alex Rivera"}]) == signals
+    assert candidate_agent.expert_signals([{"source": "web", "url": url, "title": "Alex Rivera"}]) == signals
 
 
 def test_grouping_instructions_allow_merging_directory_profiles_on_shared_detail():
-    text = agents.GROUP_INSTRUCTIONS
+    text = candidate_agent.GROUP_INSTRUCTIONS
     assert "IMENet" in text and "same specialty in the same state" in text
     assert "never on the name alone" in text and "never alone" in text  # hints never merge alone
 
@@ -418,7 +418,7 @@ def test_cap_applies_after_ranking(sources):
     people = [person(["E5"], summary=f"web {i}") for i in range(12)] + [person(["E4"], summary="court")]
     sources(model=FakeModel(web=[WEB_RESULTS], json=[{"people": people}]))
     candidates, _, _ = run()
-    assert len(candidates) == agents.MAX_CANDIDATES
+    assert len(candidates) == candidate_agent.MAX_CANDIDATES
     assert candidates[0].summary == "court"
 
 
@@ -433,8 +433,8 @@ def test_bad_model_stream_still_reports_failed_sources(sources, monkeypatch, str
     monkeypatch.setattr(llm, "call_model", web_fake_grouping_real)
     monkeypatch.setattr(llm, "transport", httpx.MockTransport(lambda request: httpx.Response(200, text=stream)))
     steps = Steps()
-    with pytest.raises(agents.FindCandidatesError, match="AI grouping step failed") as err:
-        asyncio.run(agents.find_candidates(NAME, None, steps))
+    with pytest.raises(candidate_agent.FindCandidatesError, match="AI grouping step failed") as err:
+        asyncio.run(candidate_agent.find_candidates(NAME, None, steps))
     assert [f.source for f in err.value.failed_sources] == ["courtlistener", "group_candidates"]
     assert steps.last("group_candidates")[1] == "failed"
 
@@ -444,7 +444,7 @@ def test_long_web_titles_are_capped_in_candidates(sources):
     sources(model=FakeModel(web=[long_title], json=[GROUPING]))
     candidates, _, _ = run()
     titles = [e.title for c in candidates for e in c.evidence]
-    assert max(len(t) for t in titles) <= agents.LIMITS["title"]
+    assert max(len(t) for t in titles) <= candidate_agent.LIMITS["title"]
 
 
 # Follow-up loop (DESIGN 4A): an ADK agent calls sources as tools after round 1; guards stay in code.
@@ -489,7 +489,7 @@ def test_loop_calls_tools_and_new_hits_are_grouped_with_all_guards(sources, adk_
     assert "E8 [web]" in group_call["input"] and "found by: follow-up search" in group_call["input"]
     assert "linkedin" not in group_call["input"]
     # ranking: court first; E9 (never returned by a tool) dropped; copied summary removed
-    assert [c.summary for c in candidates] == ["court", agents.SUMMARY_REMOVED]
+    assert [c.summary for c in candidates] == ["court", candidate_agent.SUMMARY_REMOVED]
     assert candidates[1].evidence[0].url == LOOP_URL
     assert candidates[1].expert_signals == ["web_expert_witness"]
     assert all("SYNTHETIC" not in c.model_dump_json() for c in candidates)
@@ -501,8 +501,8 @@ def test_loop_stops_at_the_step_cap_and_keeps_tool_results(sources, adk_model):
     model, _ = sources(model=loop_model([person(["E8"])]))
     adk_model.script = [call("web_search", query=f'"Alex Rivera" lead {i}') for i in range(10)]
     candidates, _, steps = run()
-    assert len(adk_model.seen) == agents.LOOP_STEPS
-    assert len([c for c in model.calls if c["web_search"]]) == 2 + agents.LOOP_CAPS["web_search"]
+    assert len(adk_model.seen) == candidate_agent.LOOP_STEPS
+    assert len([c for c in model.calls if c["web_search"]]) == 2 + candidate_agent.LOOP_CAPS["web_search"]
     assert tool_reply(adk_model, 3) == {"error": LIMIT_REACHED}  # tool cap reached
     assert [c.evidence[0].url for c in candidates] == [LOOP_URL]  # evidence kept after the stop
     assert steps.last("group_candidates")[2] == (
@@ -510,19 +510,19 @@ def test_loop_stops_at_the_step_cap_and_keeps_tool_results(sources, adk_model):
 
 
 def test_loop_stops_at_the_time_limit_and_grouping_still_runs(sources, adk_model, monkeypatch):
-    monkeypatch.setattr(agents, "TOTAL_SECONDS", 0.3)
-    monkeypatch.setattr(agents, "GROUP_RESERVE", 0.0)
-    monkeypatch.setattr(agents, "MIN_LOOP", 0.1)
+    monkeypatch.setattr(candidate_agent, "TOTAL_SECONDS", 0.3)
+    monkeypatch.setattr(candidate_agent, "GROUP_RESERVE", 0.0)
+    monkeypatch.setattr(candidate_agent, "MIN_LOOP", 0.1)
     model, _ = sources(model=loop_model([person(["E4"])]))
     adk_model.script = [HANG]
     candidates, _, steps = run()
     assert [c.summary for c in candidates] == ["Expert."]
-    assert model.calls[-1]["schema"] is agents.GROUP_SCHEMA
+    assert model.calls[-1]["schema"] is candidate_agent.GROUP_SCHEMA
     assert steps.last("group_candidates")[2].endswith("stopped at the time limit")
 
 
 def test_loop_is_skipped_without_time_left(sources, adk_model, monkeypatch):
-    monkeypatch.setattr(agents, "TOTAL_SECONDS", 0.0)
+    monkeypatch.setattr(candidate_agent, "TOTAL_SECONDS", 0.0)
     sources(model=loop_model([person(["E4"])]))
     candidates, _, steps = run()
     assert adk_model.seen == [] and candidates
@@ -534,8 +534,8 @@ def test_tools_refuse_queries_without_the_full_name(sources, adk_model):
     adk_model.script = [call("web_search", query="Rivera toxicology"), call("court_opinions", full_name="Alex Smith"),
                         call("openalex_authors", full_name="Rivera"), "DONE"]
     run()
-    assert tool_reply(adk_model, 1) == {"error": agents.NO_FULL_NAME}
-    assert tool_reply(adk_model, 2) == tool_reply(adk_model, 3) == {"error": agents.OTHER_NAME}
+    assert tool_reply(adk_model, 1) == {"error": candidate_agent.NO_FULL_NAME}
+    assert tool_reply(adk_model, 2) == tool_reply(adk_model, 3) == {"error": candidate_agent.OTHER_NAME}
     assert len([c for c in model.calls if c["web_search"]]) == 2  # round 1 only
     assert len([r for r in seen if r.url.host == "www.courtlistener.com"]) == 1
 
@@ -546,8 +546,8 @@ def test_web_tool_checks_the_cut_query_and_refuses_banned_sites(sources, adk_mod
     adk_model.script = [call("web_search", query=long_query),
                         call("web_search", query='"Alex Rivera" expert site:linkedin.com'), "DONE"]
     run()
-    assert tool_reply(adk_model, 1) == {"error": agents.NO_FULL_NAME}
-    assert tool_reply(adk_model, 2) == {"error": agents.BLOCKED_SITE}
+    assert tool_reply(adk_model, 1) == {"error": candidate_agent.NO_FULL_NAME}
+    assert tool_reply(adk_model, 2) == {"error": candidate_agent.BLOCKED_SITE}
     assert len([c for c in model.calls if c["web_search"]]) == 2  # round 1 only: nothing was sent
 
 
@@ -599,7 +599,7 @@ def test_loop_model_failure_is_noted_and_grouping_still_runs(sources, adk_model)
 def test_store_hits_drops_blocked_and_repeated_hits():
     store = Run(10, {})
     ok = {"source": "web", "url": "https://example.org/a", "title": "A", "note": None, "query": "follow-up"}
-    lines = agents.store_hits(store, [ok, ok | {"title": "again"},
+    lines = candidate_agent.store_hits(store, [ok, ok | {"title": "again"},
                                       ok | {"url": "https://www.linkedin.com/in/x"},
                                       ok | {"url": "https://scholar.google.com/x"}])
     assert lines == ["E1 [web] A | https://example.org/a | found by: follow-up search"]

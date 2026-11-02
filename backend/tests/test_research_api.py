@@ -146,12 +146,12 @@ def test_model_failure_after_a_tool_keeps_findings(client, candidate_id, saving_
 
 
 def test_crash_outside_the_agent_fails_job(client, candidate_id, monkeypatch):
-    from app import main_agent
+    from app import research_agent
 
     async def crash(*args):
         raise ValueError()
 
-    monkeypatch.setattr(main_agent, "research", crash)
+    monkeypatch.setattr(research_agent, "research", crash)
     started = client.post("/research", json={"candidate_id": candidate_id}).json()
     job = wait_for_job(client, started["job_id"])
     assert job["status"] == "failed" and job["error"] == "ValueError" and job["result"] is None

@@ -2,7 +2,7 @@
 
 import asyncio
 
-from app import agents, llm, main_agent, store, trace
+from app import candidate_agent, llm, research_agent, store, trace
 from app.models import Candidate
 
 CANDIDATE_STEPS = [
@@ -34,10 +34,10 @@ async def run_candidate_search(job_id: str, search_id: str, name: str, hints: di
         store.set_step(job_id, step, status, detail)
 
     try:
-        candidates, failed = await agents.find_candidates(name, hints, on_step)
+        candidates, failed = await candidate_agent.find_candidates(name, hints, on_step)
         store.save_candidates(search_id, candidates, failed)
     except Exception as exc:  # noqa: BLE001 - any crash must mark the job failed
-        # agents.FindCandidatesError carries the sources that failed before the AI step did
+        # candidate_agent.FindCandidatesError carries the sources that failed before the AI step did
         if failed := getattr(exc, "failed_sources", None):
             store.save_failed_sources(search_id, failed)
         store.finish_job(job_id, "failed", error=str(exc) or type(exc).__name__)
@@ -68,7 +68,7 @@ async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testi
     traced = trace.start(job_id)  # every model turn and tool call of this job goes to its trace
     try:
         try:
-            run = await main_agent.research(job_id, dossier_id, candidate, testimony_list)
+            run = await research_agent.research(job_id, dossier_id, candidate, testimony_list)
         except llm.ModelError as exc:
             store.add_gap(dossier_id, "main_agent", str(exc))
             trace.record("gap", step="main_agent", reason=str(exc))
@@ -80,8 +80,8 @@ async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testi
                 store.finish_job(job_id, "failed", error=str(exc))
                 return
         else:
-            store.set_step(job_id, "main_agent", "done", main_agent.stop_detail(run.stopped))
-            trace.record("run_end", "main_agent", stopped=main_agent.stop_detail(run.stopped), job="done",
+            store.set_step(job_id, "main_agent", "done", research_agent.stop_detail(run.stopped))
+            trace.record("run_end", "main_agent", stopped=research_agent.stop_detail(run.stopped), job="done",
                          final_text=run.text, model_calls=run.calls, **trace.totals())
     except Exception as exc:  # noqa: BLE001 - any crash must mark the job failed
         trace.record("run_end", "main_agent", stopped="crash", job="failed", error=trace.error(exc), **trace.totals())

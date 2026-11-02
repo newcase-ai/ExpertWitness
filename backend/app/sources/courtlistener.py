@@ -125,7 +125,7 @@ def to_hit(result: dict) -> dict:
         "title": case_name or "Court opinion",
         "note": f"{court or 'court'}, filed {filed or 'unknown date'}",
         "query": "expert",  # the search requires expert-role words near the name
-        # same case filed twice (e.g. two opinion records): app/agents.py keeps the lowest opinion id
+        # same case filed twice (e.g. two opinion records): app/candidate_agent.py keeps the lowest opinion id
         "case": (case_name, court, filed),
         "opinion_id": opinion_id_of(opinions),
         # prompt only, never returned (the raw search body is cached, DESIGN 4)
