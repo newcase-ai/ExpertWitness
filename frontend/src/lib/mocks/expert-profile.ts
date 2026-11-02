@@ -1,58 +1,7 @@
 // Finished expert research, mocked. Fictional experts; the ids match the candidates the backend
 // returns (backend/main.py). Swap in real research here once it exists.
 
-export type Side = 'plaintiff' | 'defense' | 'unknown'
-export type Involvement = 'Deposition' | 'Trial testimony' | 'Mentioned'
-
-export interface ExpertCase {
-  year: number
-  name: string
-  description: string
-  court: string
-  side: Side
-  involvement: Involvement
-}
-
-export interface Fact {
-  label: string
-  value: string
-  flag?: boolean // something opposing counsel could use
-  details?: Entry[] // shown in the popup; empty means nothing was found
-}
-
-export interface Entry {
-  title: string
-  detail: string
-}
-
-export interface Role {
-  title: string
-  org: string
-  dates?: string
-  current?: boolean
-}
-
-export interface ExpertProfile {
-  name: string
-  initials: string
-  title: string
-  contact: Fact[]
-  tags: string[]
-  qualifications: string
-  highlights: Fact[]
-  cases: ExpertCase[]
-  daubertChallenges: number
-  documents: Fact[]
-  risk: Fact[]
-  publications: Entry[]
-  news: Entry[]
-  social: Entry[]
-  online: Entry[]
-  career: Role[]
-  education: Entry[]
-  professional: Fact[]
-  sources: string[]
-}
+import { ExpertCase, ExpertProfile, Entry, Fact, Involvement } from '@/lib/types'
 
 // Transcript details come straight from the case list so the counts always match.
 const transcripts = (cases: ExpertCase[], involvement: Involvement): Entry[] =>

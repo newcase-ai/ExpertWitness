@@ -1,5 +1,5 @@
 // Run: npx tsx src/lib/case-context.check.ts
-import { detectType } from './case-context'
+import { detectType } from '@/lib/case-context'
 
 const eq = (a: unknown, b: unknown) => {
   if (a !== b) throw new Error(`${a} !== ${b}`)

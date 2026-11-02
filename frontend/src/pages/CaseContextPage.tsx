@@ -6,16 +6,11 @@ import { Check, ChevronLeft, Upload, X } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { Case, CASES, ExpertRole } from '@/lib/cases-mock'
-import { DEMO_PROFILES } from '@/lib/expert-profile-mock'
-import {
-  caseContexts,
-  ContextDoc,
-  detectType,
-  DOC_TYPES,
-  DocType,
-  MOCK_DRAFTS,
-} from '@/lib/case-context'
+import { Case, ExpertRole } from '@/lib/types'
+import { CASES } from '@/lib/mocks/cases'
+import { DEMO_PROFILES } from '@/lib/mocks/expert-profile'
+import { MOCK_DRAFTS } from '@/lib/mocks/case-drafts'
+import { caseContexts, ContextDoc, detectType, DOC_TYPES, DocType } from '@/lib/case-context'
 
 const ROLES: { id: ExpertRole; label: string; note: string }[] = [
   { id: 'opposing', label: "The other side's expert", note: 'Challenge, impeach or disqualify' },

@@ -154,17 +154,6 @@ export async function startResearch(candidateId: string): Promise<string> {
 export const getDossier = (dossierId: string): Promise<Dossier> =>
   getJson(`/api/dossiers/${dossierId}`)
 
-// Follows a saved research run until it ends, reporting each poll, and returns what it saved. A
-// failed or killed run still returns its findings, with `error` saying why it stopped.
-export async function waitForResearch(
-  dossier: Dossier,
-  onProgress: (job: ResearchJob) => void
-): Promise<ResearchFindings & { error: string | null }> {
-  const job = await pollDone<ResearchJob>(`/api/jobs/${dossier.job_id}`, onProgress)
-  const saved: ResearchFindings = await getJson(`/api/dossiers/${dossier.dossier_id}/findings`)
-  return { ...saved, error: job.status === 'failed' ? (job.error ?? 'Research failed') : null }
-}
-
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed'
 
 export interface SearchSummary {

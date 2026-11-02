@@ -9,15 +9,11 @@ import {
   Loader2,
   Sparkles,
 } from 'lucide-react'
-import ChatInput from '@/components/ChatInput'
+import ChatInput from '@/components/profile/ChatInput'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { cn } from '@/lib/utils'
-import {
-  findInvestigation,
-  INVESTIGATIONS,
-  Investigation,
-  InvestigationTopic,
-} from '@/lib/expert-investigate-mock'
+import { findInvestigation, INVESTIGATIONS } from '@/lib/mocks/expert-investigate'
+import { Investigation, InvestigationTopic } from '@/lib/types'
 
 const STEP_MS = 850
 const TOPICS: InvestigationTopic[] = ['Credibility', 'Testimony', 'Fees & practice']

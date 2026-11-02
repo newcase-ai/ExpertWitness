@@ -2,18 +2,7 @@
 // the same demo ids as DEMO_PROFILES. A highlight target is `${sectionId}:${item label}`, where the
 // label is the case name, fact label, entry title or career role title as shown in the profile.
 
-export type InvestigationTopic = 'Credibility' | 'Testimony' | 'Fees & practice'
-
-export interface Investigation {
-  question: string
-  topic: InvestigationTopic
-  /** Free-typed questions match the investigation with the most of these (lowercase) in them. */
-  keywords: string[]
-  steps: string[]
-  answer: string // markdown
-  sources: string[]
-  highlights: { target: string; note: string }[]
-}
+import { Investigation } from '@/lib/types'
 
 export const INVESTIGATIONS: Record<string, Investigation[]> = {
   'demo-1': [

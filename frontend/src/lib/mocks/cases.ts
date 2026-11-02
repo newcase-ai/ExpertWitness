@@ -1,11 +1,5 @@
 // The user's cases, mocked. Swap for the real case list once the backend has one.
-export interface Case {
-  id: string
-  name: string
-  type: string
-  court: string
-  client: 'plaintiff' | 'defendant' // the side the user's firm represents
-}
+import { Case } from '@/lib/types'
 
 export const CASES: Case[] = [
   {
@@ -30,5 +24,3 @@ export const CASES: Case[] = [
     client: 'plaintiff',
   },
 ]
-
-export type ExpertRole = 'opposing' | 'ours'
