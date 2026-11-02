@@ -919,6 +919,9 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   not people-search are saved (`memory.save_state_site`). Official = `.gov` or a state `.us` name
   (`state.tx.us`), not look-alikes like `arizonacourt.us`. Official sites first. First call per
   state takes about 35-70 s; later calls come from memory.
+- The list only grows: discovery merges into what is saved and never removes a site. It runs again
+  when the state's last discovery is older than `STALE_DAYS` (90). `notes` says where a site came
+  from (`found: web search`, `learned: site_guide`); only `found:` rows date a discovery.
 - Arguments: two-letter code or full state name (normalise with `app.sources.state_of`); anything
   else -> `refuse("unknown state")`.
 - Reply: `{"state", "sites": [{"domain", "what", "reliability", "blocked": reason|null}], "from_memory": bool}`.
@@ -929,7 +932,8 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   never saved (test).
 
 **Tool 3: site guide (engineer, T3).** File `app/tools/site_guide.py`.
-`site_guide(domain: str)`, label "Site guide", cap 4.
+`site_guide(domain: str, state: str = "")`, label "Site guide", cap 4. With a `state`, an official
+site it read is added to that state's sites (tool 2's memory, `notes` `learned: site_guide`).
 - Purpose: learn how to search one website and remember it (memory 2).
 - Reads `memory.manual(domain)`; if missing, reads up to 3 pages of the site (Firecrawl
   `scrape`, after `ctx.fetch_ok`), then `ctx.ask_model` writes `how_to` (search URL pattern,

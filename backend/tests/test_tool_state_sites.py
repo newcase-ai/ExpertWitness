@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from app import llm, memory
-from app.tools.state_sites import UNKNOWN_STATE, is_official
+from app import llm, memory, store
+from app.tools.state_sites import LEARNED, UNKNOWN_STATE, is_official
 from tests.fakes import FakeModel, run_tool, tool_ctx_fixture  # noqa: F401 - fixtures
 
 
@@ -92,3 +92,27 @@ def test_is_official():
     assert is_official("azmd.gov") and is_official("tmb.state.tx.us") and is_official("co.pima.az.us")
     assert not is_official("arizonacourt.us") and not is_official("illinoispeoplesearch.us")
     assert not is_official("ncmedboard.org")
+
+
+def make_stale(state):
+    store.execute("update state_sites set updated_at = '2000-01-01T00:00:00Z' where state = ?", (state,))
+
+
+def test_stale_list_is_discovered_again_and_merged(tool_ctx, model):
+    model([[hit("med.ohio.gov")], [], []], [label("S1")])
+    asyncio.run(run_tool(tool_ctx, "sites_for_state", state="OH"))
+    make_stale("OH")
+    fake = model([[hit("courts.ohio.gov")], [], []], [label("S1")])
+    result = asyncio.run(run_tool(tool_ctx, "sites_for_state", state="OH"))
+    assert result["from_memory"] is False and fake.calls
+    assert saved() == ["courts.ohio.gov", "med.ohio.gov"]  # nothing saved is removed
+
+
+def test_learned_or_seeded_only_list_is_discovered(tool_ctx, model):
+    """Sites added by site_guide (or seeded by hand) never count as a discovery."""
+    memory.save_state_site("OH", "med.ohio.gov", "physician licence lookup", "high", LEARNED)
+    memory.save_state_site("OH", "clerk.ohio.gov", "county records", "high", "seeded: demo")
+    fake = model([[hit("courts.ohio.gov")], [], []], [label("S1")])
+    result = asyncio.run(run_tool(tool_ctx, "sites_for_state", state="OH"))
+    assert result["from_memory"] is False and fake.calls
+    assert saved() == ["clerk.ohio.gov", "courts.ohio.gov", "med.ohio.gov"]

@@ -7,6 +7,8 @@ the model only names the link (L3) or form (F1) and explains its parts, so no UR
 Searches that need a POST form or a script go to `not_usable`.
 Every call updates the manual: it reads pages not read before (`pages_read`) and merges what it finds
 with the saved manual (new templates added, ones seen again refreshed, nothing lost).
+Given a `state`, an official site that was read is added to that state's sites (tool 2's memory), so
+sites the agent finds on its own join the list for later runs.
 No logins (gotcha 4): a site asking for a login, a payment or a robot check is blocked (memory 4).
 Page text stays in memory (gotcha 15); never a credential in login_notes (gotcha 45)."""
 
@@ -19,6 +21,7 @@ from app import memory
 from app.evidence import refuse
 from app.sources import firecrawl, host_of, on_domain
 from app.tools import Ctx, tool, web_reader  # web_reader (tool 7): robot check, checked HTML fetch
+from app.tools.state_sites import LEARNED, is_official, state_code
 
 MAX_PAGES = 3  # the home page + up to 2 search or download pages
 MAX_LINKS = 40  # links shown to the model, useful-looking ones first
@@ -319,9 +322,10 @@ async def page_html(ctx: Ctx, url: str) -> str | None:
     return got[2].decode("utf-8", errors="replace")
 
 
-async def read_pages(ctx: Ctx, domain: str, read_before: set[str] = frozenset()) -> tuple[list[dict], str | None]:
-    """The home page and up to 2 useful links on the site (links not read in earlier runs first), and
-    the URL of a robot check, if any."""
+async def read_pages(ctx: Ctx, domain: str, read_before: set[str] = frozenset()) -> tuple[list[dict], str | None, str]:
+    """The home page and up to 2 useful links on the site (links not read in earlier runs first), the
+    URL of a robot check, if any, and the site's domain: the one the home page redirected to when that
+    is another site (apps.azcourts.gov -> azcourts.gov), so its links are followed, not dropped."""
     pages, queue, seen = [], [f"https://{domain}/"], set()
     while queue and len(pages) < MAX_PAGES:
         url = queue.pop(0)
@@ -338,12 +342,15 @@ async def read_pages(ctx: Ctx, domain: str, read_before: set[str] = frozenset())
             continue
         if ctx.fetch_ok(page["url"]):  # redirected to a site we may not read
             continue
+        landed = memory.domain_of(host_of(page["url"]) or "")
+        if not pages and landed and not on_domain(landed, (domain,)):
+            domain = landed
         if web_reader.robot_check(page["markdown"]):
-            return pages, page["url"]
+            return pages, page["url"], domain
         pages.append(page)
         useful = [link[1] for link in links_of(page, domain) if is_useful(link)]
         queue = sorted(queue + useful, key=lambda u: short_url(u) in read_before)  # stable: unread first
-    return pages, None
+    return pages, None, domain
 
 
 async def forms_of(ctx: Ctx, pages: list[dict], domain: str) -> list[dict]:
@@ -357,7 +364,7 @@ async def forms_of(ctx: Ctx, pages: list[dict], domain: str) -> list[dict]:
 
 
 @tool(label="Site guide", cap=4)
-async def site_guide(ctx: Ctx, domain: str) -> dict:
+async def site_guide(ctx: Ctx, domain: str, state: str = "") -> dict:
     """Learn how to get records from one website (for example a state court or licence board site
     from sites_for_state) by fetching URLs. Returns a manual: URL templates for searches, single
     records and documents, e.g. "https://site/search?query={query}" or ".../caseinfo/{year}/{number}"
@@ -365,7 +372,10 @@ async def site_guide(ctx: Ctx, domain: str) -> dict:
     usable by URL); and whether a login or JavaScript is needed. firecrawl_search uses a site's search
     templates by itself. Every call reads more of the site and adds to its saved manual (`added` =
     new templates), so call it again for a site you need more from. `blocked` says the site must not
-    be read (login, paywall or robot check); its saved manual, if any, is still returned."""
+    be read (login, paywall or robot check); its saved manual, if any, is still returned. When the
+    site redirects to another one, the reply's `domain` is that site: search it by that name. `state`:
+    the US state whose records the site holds (two-letter code or name), if any; an official site is
+    then added to that state's sites for later runs."""
     site = clean_domain(domain)
     if not site:
         return refuse(BAD_DOMAIN)
@@ -378,12 +388,17 @@ async def site_guide(ctx: Ctx, domain: str) -> dict:
             return reply(site, saved, from_memory=True)
         return refuse(refusal)
     try:
-        pages, challenge = await read_pages(ctx, site, set(old.get("pages_read") or []))
+        pages, challenge, moved = await read_pages(ctx, site, set(old.get("pages_read") or []))
     except Exception:
         if not saved:
             raise
         ctx.log("site not readable now: manual from memory")
         return reply(site, saved, from_memory=True)
+    if moved != site:  # the site lives elsewhere now: learn and save that site instead
+        ctx.log(f"{site} redirects to {moved}")
+        site, saved = moved, memory.manual(moved)
+        old = as_manual(saved["how_to"]) if saved else {}
+        old = {} if "text" in old else old
     if challenge:
         memory.block_site(site, "captcha", challenge)
         ctx.add_gap(f"{site} asks for a robot check: not read")
@@ -413,6 +428,8 @@ async def site_guide(ctx: Ctx, domain: str) -> dict:
     if (blocker := answer.get("blocker")) in BLOCKERS:
         memory.block_site(site, blocker, pages[0]["url"])
         ctx.add_gap(f"{site} needs a {blocker}: not read")
+    elif (code := state_code(state)) and is_official(site) and (holds := one_line(answer.get("holds"))):
+        memory.save_state_site(code, site, holds, "high", LEARNED)
     ctx.log(f"{len(pages)} pages read, {len(forms)} search forms, {added} new templates, manual "
             + ("updated" if saved else "saved") + (f", blocked: {blocker}" if blocker in BLOCKERS else ""))
     return reply(site, memory.manual(site), from_memory=False, added=added)

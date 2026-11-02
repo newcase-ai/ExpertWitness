@@ -1,10 +1,14 @@
 """Tool 2: sites for a state (DESIGN 4B.9, memory 3). Which public websites hold court, licence or
-discipline records for one US state. Three web searches (courts, medical board, licensing agency);
-domains come only from their results, never from model text; the model only labels them, and only
-official, useful sites are kept. Snippets and search notes stay in memory (gotcha 15)."""
+discipline records for one US state. Saved sites come from memory; a state with none, or whose last
+discovery is older than STALE_DAYS, is discovered again and merged in (nothing saved is removed).
+Discovery: three web searches (courts, medical board, licensing agency). Domains come only from their
+results, never from model text; the model only labels them, and only official, useful sites
+are kept. site_guide adds an official site it read for a state (`notes` LEARNED), so the list grows
+with every run. Snippets and search notes stay in memory (gotcha 15)."""
 
 import asyncio
 import re
+from datetime import UTC, datetime, timedelta
 
 from app import llm, memory
 from app.evidence import refuse
@@ -18,6 +22,9 @@ STATE_NAMES = {code: name.title() for name, code in US_STATES.items()}
 UNKNOWN_STATE = "unknown state: give a two-letter code or a full US state name"
 NO_SITES = "no record sites found for {}"
 RELIABILITY = ["high", "medium", "low", "unknown"]
+STALE_DAYS = 90  # a state whose last discovery is older is discovered again
+# `notes` of a saved site: where it came from. Only "found:" rows date the last discovery.
+FROM_SEARCH, LEARNED = "found: web search", "learned: site_guide"
 QUERIES = [  # tuned on live runs for AZ, IL, NC and TX (2026-11-01)
     "{} judicial branch official website: court case search and records",
     "{} medical board official website: physician licence verification and discipline",
@@ -84,6 +91,13 @@ def site_rows(state: str) -> list[dict]:
              "blocked": memory.blocked(r["domain"])} for r in rows]
 
 
+def needs_discovery(state: str, sites: list[dict]) -> bool:
+    """No sites to show, or no web search discovery in the last STALE_DAYS."""
+    found = [r["updated_at"] for r in memory.sites_in(state) if (r["notes"] or "").startswith("found:")]
+    cutoff = (datetime.now(UTC) - timedelta(days=STALE_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return not sites or not found or max(found) < cutoff
+
+
 def domains(found: llm.ModelResult, seen: set[str]) -> list[tuple[str, dict]]:
     """Up to PER_SEARCH new, allowed (domain, result) pairs from one search, official ones first."""
     hits = []
@@ -97,7 +111,8 @@ def domains(found: llm.ModelResult, seen: set[str]) -> list[tuple[str, dict]]:
 
 
 async def find_sites(ctx: Ctx, state: str) -> None:
-    """Three web searches at once, then one labelling call; saves only official, useful sites."""
+    """Three web searches at once, then one labelling call; saves only official, useful sites
+    (merged with the saved ones)."""
     name = STATE_NAMES[state]
     founds = await asyncio.gather(*[
         llm.call_model(SEARCH_INSTRUCTIONS, f"Search query: {q.format(name)}", web_search=True) for q in QUERIES])
@@ -121,7 +136,7 @@ async def find_sites(ctx: Ctx, state: str) -> None:
             continue
         if label.get("reliability") != "high" or label.get("useful") is not True or label.get("people_search") is not False:
             continue
-        memory.save_state_site(state, hits[int(ref) - 1][0], label["what"], "high")
+        memory.save_state_site(state, hits[int(ref) - 1][0], label["what"], "high", FROM_SEARCH)
 
 
 @tool(label="Sites for a state", cap=3)
@@ -129,12 +144,12 @@ async def sites_for_state(ctx: Ctx, state: str) -> dict:
     """List public websites that hold court, licence or discipline records for one US state, so you
     can search them with the other tools. `state` is a two-letter code ("OH") or a full state name.
     Official (.gov) sites come first; `blocked` says a site must not be read (and why). Sites are
-    remembered, so asking again for the same state is free."""
+    remembered and the list grows with every run, so asking again for the same state is usually free."""
     code = state_code(state)
     if not code:
         return refuse(UNKNOWN_STATE)
     sites = site_rows(code)
-    from_memory = bool(sites)
+    from_memory = not needs_discovery(code, sites)
     if not from_memory:
         await find_sites(ctx, code)
         sites = site_rows(code)

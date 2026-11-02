@@ -42,8 +42,8 @@ state case. Then search the web and the court's own site (firecrawl_search, web_
 and when it was heard, the parties, the expert's side and role, rulings on their testimony, fees,
 transcripts and news. For a state where the expert testified, worked or holds a licence, find that
 state's court, licence and discipline sites (sites_for_state), learn how to search each one you
-need (site_guide) and search them for other cases and records about the expert (firecrawl_search
-with `sites`). For another form of the name, an employer, a law firm, a lawyer or a party, search
+need (site_guide, with its `state`; wait for its reply before searching that site) and search them
+for other cases and records about the expert (firecrawl_search with `sites`). For another form of the name, an employer, a law firm, a lawyer or a party, search
 with it. Reply DONE when nothing new is likely."""
 
 
