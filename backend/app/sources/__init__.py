@@ -1,4 +1,5 @@
-"""Source clients for the candidate search. Shared helpers live here."""
+"""Source clients: raw API access (HTTP, rate limits, cache) used by the candidate search and the
+agent tools in `app/tools`. Shared name, domain and US-state helpers live here."""
 
 import re
 import unicodedata
