@@ -17,7 +17,7 @@ from app import http, memory
 from app.config import get_settings
 from app.evidence import refuse
 from app.sources import SourceSkipped, firecrawl, host_of
-from app.tools import FILE_MAX, FILES_PER_JOB, RESULT_MAX, Ctx, secret, tool
+from app.tools import FILE_MAX, RESULT_MAX, Ctx, secret, tool
 from app.tools.firecrawl_search import HOSTNAME
 
 URL_MAX = 2_000
@@ -43,7 +43,6 @@ TOO_MANY_REDIRECTS = f"more than {MAX_REDIRECTS} redirects"
 TOO_LARGE = "the file is too large"
 NOT_ALLOWED_TYPE = "only PDF, web page and plain text files can be downloaded"
 FAKE_PDF = "the file says it is a PDF but is not one"
-FILE_LIMIT = "file limit reached for this job"
 BLOCKED_NOW = {"login": "this site needs a login; it is now blocked for future jobs",
                "paywall": "this site is behind a paywall; it is now blocked for future jobs",
                "captcha": "this site shows a robot check; it is now blocked for future jobs"}
@@ -210,8 +209,6 @@ async def download_file(ctx: Ctx, url: str) -> dict:
     asked = ASKED.get((ctx.dossier_id, url))
     if old := next((f for f in saved if f["source_url"] == url or f["file_id"] == asked), None):
         return already_saved(old)
-    if len(saved) >= FILES_PER_JOB:
-        return refuse(FILE_LIMIT)
     if not get_settings().firecrawl_api_key:  # the text version of pages and PDFs needs Firecrawl
         raise SourceSkipped("FIRECRAWL_API_KEY is not set")
     got = await fetch(ctx, url)

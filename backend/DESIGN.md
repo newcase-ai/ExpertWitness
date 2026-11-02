@@ -882,6 +882,25 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
   Looks up one named case for the expert (`courtlistener.find_case`). Found -> kind `case_check`
   (confidence `high`); not found -> nothing saved, reply `{"found": false}` (an invented case
   name never becomes a record; replaces gotcha 39's rule).
+- **Court filings** (`app/tools/court_files.py`, a helper, not a tool; user, 2026-11-02): after either
+  tool saves a case of level high or medium, `check_case_files` checks its RECAP filings. At most 10
+  dockets per run (`MAX_CASES_PER_RUN`, `Run.dockets`), each once. Steps: list the public filings
+  (`courtlistener.docket_documents`, query `docket_id:<n> AND is_available:true`, first 100; more ->
+  gap); one AI title check per case (context `known_so_far`) picks the likely ones (the expert's own
+  report, declaration, affidavit, deposition, CV, or a motion/order to admit, limit or exclude them);
+  each picked filing is streamed to `data/files/<dossier>/tmp/`; text in this order: pypdf text layer,
+  CourtListener's own OCR text (`document_text`), local OCR (RapidOCR on pypdfium2 pages, until the
+  run's time is up). Code then needs the full name in the text (gotcha 13; no AI call otherwise); the
+  AI reads batches (`pdf_text.batches`, 128 pages / `BATCH_CHARS`), stops at the first relevant one; an
+  HTTP 400 splits the batch in half, down to one page. Relevant -> finding kind `court_file` (source
+  type `courtlistener_document`, URL = the filing's CourtListener page, facts: case_name, case_ref,
+  document_number, date_filed, page_count, kind `own_work`/`about_testimony`, reason, file_id,
+  text_source; confidence high only for a high case), saved first, then the PDF moved into place by
+  `ctx.keep_file` with a `.md` text version ([Page N] lines). No size cap; everything else is deleted
+  at once. One activity row per filing (`court_file`, fixed reason text; the AI's reason only in the
+  trace and the finding). Out of time -> gap "N court filings not checked: time limit". Replies get
+  `files: [{ref, file_id, title, kind}]` (at most 10) for `ask_pdf`; `court_records` cuts passages,
+  reasons and names (`fit`) so a worst-case reply stays under `RESULT_MAX`.
 - Memories: profile. Legal: gotchas 5, 11 (no token -> `SourceSkipped`), 13, 23. CourtListener
   budget stays in the source client.
 - Done when: both tools pass their tests; surname-only never kept; live Gary Stanton run keeps

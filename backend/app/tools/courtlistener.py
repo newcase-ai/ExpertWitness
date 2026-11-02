@@ -7,15 +7,18 @@ same name: the AI compares each case with what the research knows so far about t
 candidate and the profile) and gives a 0-100 likelihood, the person's role in the case and a reason.
 The code-made score below is the fallback when the model fails."""
 
+import json
 import re
 
 from app import llm
 from app.evidence import refuse, words
 from app.profile import context_label, known_so_far
 from app.sources import US_STATES, courtlistener, fold, has_full_name, state_of
-from app.tools import Ctx, tool
+from app.tools import RESULT_MAX, Ctx, tool
+from app.tools.court_files import check_case_files
 
 MAX_CASES = 10
+FILES_SHOWN = 10  # ponytail: more saved files stay findings (kind court_file), just not in the reply
 STEM = 6  # ponytail: crude stemming, a shared 6-letter prefix counts ("chiropractic" ~ "chiropractor")
 KEEP_SCORE = 25  # full name alone: kept as level "low" (user decision 2026-10-29)
 MEDIUM_SCORE = 40
@@ -177,13 +180,16 @@ async def court_records(ctx: Ctx) -> dict:
     from PACER: an empty result does not mean the expert never testified. Use it once, after
     publications and web search; call it again only if its error says that can help (CourtListener
     is sometimes slow). Takes no arguments. Each case comes with one passage around the name;
-    `skipped_same_name` counts cases about someone else with the same name."""
+    `skipped_same_name` counts cases about someone else with the same name. For high and medium cases
+    the case's public filings are checked too: those that are the expert's own work (report,
+    declaration, deposition, CV) or about their testimony (a motion or ruling to admit, limit or
+    exclude them) are saved; `files` lists them (ref, file_id, title, kind): read one with ask_pdf."""
     name = ctx.expert.display_name
     hits = await courtlistener.search_dockets(name)
     if not hits:
         ctx.add_gap(NONE_GAP)
     evidence = {plain_url(e.url) for e in ctx.expert.evidence}
-    cases, checked, skipped = [], [], 0
+    cases, checked, skipped, files = [], [], 0, []
     for hit in newest_cases(hits, evidence):
         lines = ai_lines(hit, name)
         code = match(plain_url(hit["url"]) in evidence, lines, hit["court"], ctx)
@@ -210,11 +216,26 @@ async def court_records(ctx: Ctx) -> dict:
             cases.append({"ref": ref, "case_name": hit["case_name"], "court": hit["court"],
                           "docket_number": hit["docket_number"], "date_filed": hit["date_filed"], **shown(same),
                           "passage": hit["passages"][0] if hit["passages"] else ""})
+            files += await check_case_files(ctx, hit, same, ref)
     if skipped:
         ctx.add_gap(SKIPPED_GAP.format(skipped))
     ctx.log(f"{len(hits)} cases found, {len(cases)} kept, {skipped} same-name skipped"
-            + (f" · {against}" if against else ""))
-    return {"cases": cases, "skipped_same_name": skipped}
+            + (f" · {against}" if against else "") + (f", {len(files)} files saved" if files else ""))
+    return fit({"cases": cases, "skipped_same_name": skipped, "files": files[:FILES_SHOWN]})
+
+
+# Cuts that make a worst-case reply (10 long cases + files) fit: the wrapper drops a longer one whole.
+FIT_CUTS = (("passage", 200), ("why", 150), ("passage", 0), ("case_name", 100), ("why", 0))
+
+
+def fit(reply: dict) -> dict:
+    """`reply` with its cases' passages, reasons and names cut, in FIT_CUTS order, until it fits."""
+    for key, size in FIT_CUTS:
+        if len(json.dumps(reply)) <= RESULT_MAX:
+            break
+        for case in reply["cases"]:
+            case[key] = (case[key] or "")[:size]
+    return reply
 
 
 def same_case_name(a: str, b: str) -> bool:
@@ -250,7 +271,9 @@ async def court_case(ctx: Ctx, case_name: str, court: str = "", year: int = 0) -
     so far: `same_person` (score, level, role, why); a case about someone else with the same name is
     not saved. Not found -> {"found": false}. If it fails, its error says whether calling again can help.
     Not for cases court_records already returned: they are checked and saved (a repeat call only
-    returns the saved verdict, `already_found`)."""
+    returns the saved verdict, `already_found`). A saved high or medium case also gets its filings
+    checked: `files` lists the saved ones (the expert's own work or about their testimony; ref,
+    file_id, title, kind): read one with ask_pdf."""
     if len(case_name) > CASE_NAME_MAX:
         return refuse("case name too long")
     if found := saved_case(ctx, case_name=case_name):
@@ -280,5 +303,7 @@ async def court_case(ctx: Ctx, case_name: str, court: str = "", year: int = 0) -
         confidence="low" if low else "high",
         note=f"{FOUND_NOTE}; {AI_LOW_NOTE if same['checked_by'] == 'ai' else LOW_NOTE}" if low else FOUND_NOTE,
         source_type="courtlistener_docket")
-    ctx.log(f"found · {against}")
-    return {"found": True, "ref": ref, **record, "same_person": shown(same), "passages": hit["passages"]}
+    files = await check_case_files(ctx, hit, same, ref) if ref else []
+    ctx.log(f"found · {against}" + (f", {len(files)} files saved" if files else ""))
+    return {"found": True, "ref": ref, **record, "same_person": shown(same), "passages": hit["passages"],
+            "files": files[:FILES_SHOWN]}

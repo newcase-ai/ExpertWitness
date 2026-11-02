@@ -43,7 +43,7 @@ def pages_text(path: str, page_start: int, page_end: int) -> tuple[str | None, i
 async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, question: str,
                   context: str = "") -> dict:
     """Ask one question about pages page_start to page_end (1-based, both included) of one saved
-    PDF (file_id from download_file). Think of this tool as a person who is handed only those pages,
+    PDF (file_id from download_file, or from the `files` that court_records / court_case saved). Think of this tool as a person who is handed only those pages,
     your context and your question, and nothing else: they read the pages and answer from them. So
     give good context: who the expert is, what you are looking for and why, and what you already
     found or ruled out (e.g. "pages 1-100 had no list of prior cases"). Keep the range to about
@@ -52,7 +52,7 @@ async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, questi
     file's number of pages. An `error` says what to fix before calling again."""
     row = memory.file(file_id)
     if not row or row["dossier_id"] != ctx.dossier_id:
-        return refuse("unknown file: use a file_id from download_file")
+        return refuse("unknown file: use a file_id from download_file, court_records or court_case")
     if row["mime"] != "application/pdf":
         return refuse(f"not a PDF ({row['mime']}): this tool reads PDFs only")
     try:

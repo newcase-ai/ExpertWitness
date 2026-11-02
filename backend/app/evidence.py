@@ -74,6 +74,7 @@ class Run:
     used: dict[str, int] = field(default_factory=dict)
     failures: list[tuple[str, str]] = field(default_factory=list)  # (tool, exception type)
     count: int = 0
+    dockets: set[int] = field(default_factory=set)  # CourtListener dockets whose filings were checked
 
     def left(self) -> float:
         """Seconds left in the budget (0 or less: stop)."""

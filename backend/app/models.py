@@ -13,7 +13,7 @@ NO_EXPERT_EVIDENCE_NOTE = "No expert-witness evidence found"  # on each candidat
 SEARCH_SOURCES = frozenset({"openalex", "courtlistener", "web_search"})
 SourceType = Literal[
     "courtlistener_opinion", "courtlistener_docket", "courtlistener_search", "openalex_author", "openalex_work",
-    "crossref_work", "oig_leie", "web",
+    "crossref_work", "oig_leie", "web", "courtlistener_document",
 ]
 
 

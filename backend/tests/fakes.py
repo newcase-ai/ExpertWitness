@@ -198,7 +198,8 @@ def sources_fixture(monkeypatch):
 def cl_docket(did, date, court="District Court, N.D. Example",
               passage="Exhibit 2: the claim was reviewed by Dr. Alex J. Rivera, a toxicologist", named_as=()):
     """A RECAP docket as courtlistener.search_dockets / find_case return it (synthetic)."""
-    return {"url": f"https://www.courtlistener.com/docket/{did}/doe-v-example/", "case_name": f"Doe v. Example Co. {did}",
+    return {"url": f"https://www.courtlistener.com/docket/{did}/doe-v-example/", "docket_id": did,
+            "case_name": f"Doe v. Example Co. {did}",
             "court": court, "docket_number": f"1:{did}-cv-0001", "date_filed": date, "nature_of_suit": "791 ERISA",
             "named_as": list(named_as),
             "documents": [{"description": "Exhibit 2, Appeal Decision Letter", "date_filed": date,
@@ -261,6 +262,10 @@ RESEARCH_SOURCES = {
                                "url": "https://exclusions.oig.hhs.gov/"}],
     "firecrawl.scrape": scrape_page,
     "courtlistener.find_case": find_case,
+    # Court filings of a found case (app/tools/court_files.py): none by default; tests set their own.
+    "courtlistener.docket_documents": ([], False),  # (filings, more left unlisted)
+    "courtlistener.document_text": "",
+    "courtlistener.download_document": AssertionError("unexpected download in a research test"),
     "llm.call_model": model_reply,
 }
 MODULES = {"courtlistener": courtlistener, "crossref": crossref, "firecrawl": firecrawl, "leie": leie,
