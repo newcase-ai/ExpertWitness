@@ -9,7 +9,12 @@ export interface Case {
 export type ExpertRole = 'opposing' | 'ours'
 
 export type Side = 'plaintiff' | 'defense' | 'unknown'
-export type Involvement = 'Deposition' | 'Trial testimony' | 'Mentioned'
+export type Involvement =
+  | 'Deposition'
+  | 'Trial testimony'
+  | 'Mentioned'
+  | 'Expert witness'
+  | 'Consultant or reviewer'
 
 export interface ExpertCase {
   year: number
