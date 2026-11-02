@@ -7,7 +7,10 @@ dependencies = [
     "fastapi[standard]>=0.115",
     "google-adk>=2.13.0",
     "litellm>=1.106.6",
+    "onnxruntime>=1.31.1",
     "pypdf>=6.21.4",
+    "pypdfium2>=5.14.0",
+    "rapidocr>=3.10.0",
 ]
 
 [dependency-groups]

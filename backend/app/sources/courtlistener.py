@@ -2,11 +2,13 @@
 RECAP docket search (the research tools: PACER dockets and filings, user decision 2026-11-01);
 gotchas 5, 11, 13."""
 
+import asyncio
 import html
 import logging
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import httpx
 
@@ -214,6 +216,7 @@ def to_docket(result: dict, name: str) -> dict:
                 if has_full_name(" ".join(text(x) for x in result.get(role) or []), name)]
     return {
         "url": SITE + result["docket_absolute_url"],
+        "docket_id": result["docket_id"] if isinstance(result.get("docket_id"), int) else None,
         "case_name": clean(result.get("caseName")) or "Court case",
         "court": clean(result.get("court")),
         "docket_number": clean(result.get("docketNumber")),
@@ -420,3 +423,104 @@ async def find_case(case_name: str, name: str, court: str | None = None, year: i
     if not results:
         return None
     return to_docket(max(results, key=lambda r: case_score(r, court, year)), name)  # max keeps the first of equals
+
+
+# Filings of one docket, to download (app/tools/court_files.py). The list and the text come from the
+# API (token, caps, cache); the PDF itself from the public storage host: no token, not an API call.
+STORAGE = "https://storage.courtlistener.com/"
+STORAGE_HOST = "storage.courtlistener.com"
+MAX_DOC_PAGES = 5  # 20 filings per page, each page one API call (gotcha 5)
+STORAGE_TIMEOUT = httpx.Timeout(120.0, connect=10.0)  # big scans stream slowly
+CHUNK = 1 << 20
+# "recap/gov.uscourts.nysd.1234/gov.uscourts.nysd.1234.26.0.pdf": relative, plain characters only
+SAFE_PATH = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._-]*(?:/[A-Za-z0-9_-][A-Za-z0-9._-]*)*")
+BAD_PATH = "CourtListener gave an unexpected file path; the file was not downloaded"
+DOWNLOAD_FAILED = "CourtListener storage did not send the file (network error or timeout). Try again later"
+
+
+def safe_path(value: object) -> bool:
+    return isinstance(value, str) and ".." not in value and SAFE_PATH.fullmatch(value) is not None
+
+
+def is_documents_body(body: object) -> bool:
+    """A well-formed filings search page whose `next` link (sent with the token) stays on the API."""
+    nxt = body.get("next") if isinstance(body, dict) else None
+    return is_search_body(body) and (nxt is None or (isinstance(nxt, str) and nxt.startswith(SEARCH + "?")))
+
+
+def to_document(result: dict) -> dict | None:
+    """One public filing, or None (not available, no file, odd id or path)."""
+    if result.get("is_available") is not True or not isinstance(result.get("id"), int):
+        return None
+    if not safe_path(result.get("filepath_local")):
+        return None
+    number, attachment, pages = (result.get(k) for k in ("document_number", "attachment_number", "page_count"))
+    return {
+        "id": result["id"],
+        "description": clean(result.get("short_description") or result.get("description"))[:200],
+        "document_number": str(number) if isinstance(number, int | str) and str(number) else None,
+        "attachment_number": attachment if isinstance(attachment, int) else None,
+        "date_filed": clean(result.get("entry_date_filed")),
+        "page_count": pages if isinstance(pages, int) else None,
+        "filepath_local": result["filepath_local"],
+        "url": SITE + result["absolute_url"],
+    }
+
+
+async def docket_documents(docket_id: int) -> tuple[list[dict], bool]:
+    """(docs, more_left): the docket's public filings [{id, description, document_number (str or None),
+    attachment_number (int or None), date_filed, page_count (int or None), filepath_local, url}], and
+    True when filings were left unlisted. Follows the `next` cursor for up to MAX_DOC_PAGES pages, each
+    one counted API call."""
+    key = token()
+    url, params = SEARCH, {"type": "rd", "q": f"docket_id:{int(docket_id)} AND is_available:true"}
+    out = []
+    for _ in range(MAX_DOC_PAGES):  # ponytail: filings past 5 pages (100) are not listed, only flagged
+        body = await get_json(url, params, is_documents_body, key)
+        out += [d for d in map(to_document, body["results"]) if d]
+        url, params = body.get("next"), None  # the next link already holds the query and cursor
+        if not url:
+            break
+    return out, bool(url)
+
+
+def is_text_body(body: object) -> bool:
+    return isinstance(body, dict) and "plain_text" in body and isinstance(body["plain_text"], str | None)
+
+
+async def document_text(doc_id: int) -> str:
+    """CourtListener's own text of one filing (its OCR for scans); "" if none. One API call."""
+    body = await get_json(f"{SITE}/api/rest/v4/recap-documents/{int(doc_id)}/",
+                          {"fields": "plain_text,ocr_status"}, is_text_body, token())
+    return text(body.get("plain_text"))
+
+
+async def download_document(filepath_local: str, dest: str | Path) -> int:
+    """Stream one filing's PDF to `dest` (its folder must exist) in chunks; returns the bytes written.
+    No token, no size cap, not cached, not counted against the API caps. Raises SourceFailed (fixed
+    text) and removes `dest` on any failure."""
+    if not safe_path(filepath_local):
+        raise SourceFailed(BAD_PATH)
+    dest = Path(dest)
+    if limiter := http.limiters.get("courtlistener_storage"):
+        await limiter.wait()
+    written = 0
+    try:
+        async with http.get_client().stream("GET", STORAGE + filepath_local, timeout=STORAGE_TIMEOUT) as r:
+            if r.status_code != 200:
+                raise SourceFailed(f"CourtListener storage HTTP {r.status_code}: the file was not downloaded")
+            if r.url.host != STORAGE_HOST:
+                raise SourceFailed("CourtListener storage redirected elsewhere; the file was not downloaded")
+            f = await asyncio.to_thread(dest.open, "wb")  # disk work off the event loop
+            try:
+                async for chunk in r.aiter_bytes(CHUNK):
+                    await asyncio.to_thread(f.write, chunk)
+                    written += len(chunk)
+            finally:
+                await asyncio.to_thread(f.close)
+    except BaseException as e:
+        dest.unlink(missing_ok=True)
+        if isinstance(e, httpx.HTTPError):
+            raise SourceFailed(DOWNLOAD_FAILED) from None
+        raise
+    return written

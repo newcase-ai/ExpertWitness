@@ -86,7 +86,7 @@ def test_ai_keeps_the_same_person_and_skips_a_namesake(tool_ctx, research_source
         "match": {"score": 85, "level": "high", "role": "consultant or reviewer",
                   "reasons": ["SYNTHETIC same field and kind of case"], "checked_by": "ai",
                   "context": "no profile yet, 1 findings"}}
-    assert reply == {"skipped_same_name": 1, "cases": [
+    assert reply == {"skipped_same_name": 1, "files": [], "cases": [
         {"ref": found.finding_id, "case_name": "Doe v. Example Co. 11", "court": "District Court, N.D. Example",
          "docket_number": "1:11-cv-0001", "date_filed": "2021-05-01", "score": 85, "level": "high",
          "role": "consultant or reviewer", "why": "SYNTHETIC same field and kind of case", "passage": FULL}]}
@@ -151,7 +151,7 @@ def test_surname_only_is_never_kept(tool_ctx, research_sources):
         cl_docket(3, "2018-01-01", passage=None)]})
     reply = asyncio.run(run_tool(tool_ctx, "court_records"))
     assert tool_ctx.findings() == []
-    assert reply == {"cases": [], "skipped_same_name": 2}
+    assert reply == {"cases": [], "skipped_same_name": 2, "files": []}
     assert gaps(tool_ctx) == [("court_records", "2 same-name court cases skipped: not tied to this person")]
 
 
@@ -180,7 +180,7 @@ def test_court_in_state_needs_the_whole_state_name():
 
 def test_no_cases_is_a_gap(tool_ctx, research_sources):
     research_sources({"courtlistener.search_dockets": []})
-    assert asyncio.run(run_tool(tool_ctx, "court_records")) == {"cases": [], "skipped_same_name": 0}
+    assert asyncio.run(run_tool(tool_ctx, "court_records")) == {"cases": [], "skipped_same_name": 0, "files": []}
     assert gaps(tool_ctx) == [("court_records", NONE_GAP)]
 
 

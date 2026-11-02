@@ -233,7 +233,7 @@ def test_search_hit_reads_opinion_id_not_case_id(sources):
 
 
 def docket_result(did, court, date, snippets, party=(), attorney=()):
-    return {"docket_absolute_url": f"/docket/{did}/doe-v-example-co/", "caseName": "Doe v. Example Co.",
+    return {"docket_absolute_url": f"/docket/{did}/doe-v-example-co/", "docket_id": did, "caseName": "Doe v. Example Co.",
             "court": court, "dateFiled": date, "docketNumber": f"1:{did}-cv", "suitNature": "791 ERISA",
             "party": list(party), "attorney": list(attorney),
             "recap_documents": [{"absolute_url": f"/docket/{did}/{n}/doe-v-example-co/", "snippet": s,
@@ -253,7 +253,8 @@ def test_search_dockets_full_name_only_and_fields(sources):
     assert hit["url"] == "https://www.courtlistener.com/docket/5/doe-v-example-co/"
     assert (hit["case_name"], hit["court"], hit["docket_number"], hit["date_filed"], hit["nature_of_suit"]) == (
         "Doe v. Example Co.", "District Court, D. Example", "1:5-cv", "2021-02-08", "791 ERISA")
-    assert hit["named_as"] == ["party"]
+    assert hit["named_as"] == ["party"] and hit["docket_id"] == 5
+    assert courtlistener.to_docket({"docket_absolute_url": "/docket/5/x/", "docket_id": "5"}, NAME)["docket_id"] is None
     assert hit["documents"][1] == {"description": "Exhibit 2", "date_filed": "2021-02-08",
                                    "url": "https://www.courtlistener.com/docket/5/2/doe-v-example-co/"}
     [passage] = hit["passages"]  # only the snippet that highlights a match
@@ -338,3 +339,141 @@ def test_opinion_http_error_raises(sources):
     sources(routes={"www.courtlistener.com": (404, {"detail": "Not found."})})
     with pytest.raises(RuntimeError, match="404"):
         asyncio.run(courtlistener.opinion_passages(10, "Alex Rivera"))
+
+
+# --- Filings of one docket: list, CourtListener's text, PDF download -----------------------------
+
+
+def filing(n, docket=7, **changes):
+    path = f"recap/gov.uscourts.exd.{docket}/gov.uscourts.exd.{docket}.{n}.0.pdf"
+    return {"absolute_url": f"/docket/{docket}/{n}/doe-v-example-co/", "id": 900 + n, "attachment_number": None,
+            "description": "", "short_description": f"SYNTHETIC <mark>Expert</mark> report {n} &amp; CV",
+            "document_number": str(n), "entry_date_filed": "2021-02-08", "is_available": True,
+            "page_count": 12, "filepath_local": path, "snippet": ""} | changes
+
+
+def filings_page(results, cursor=None):
+    nxt = f"{courtlistener.SEARCH}?type=rd&q=docket_id%3A7&cursor={cursor}" if cursor else None
+    return {"count": 99, "next": nxt, "previous": None, "results": results}
+
+
+def test_docket_documents_query_shape_and_filter(sources):
+    results = [filing(1), filing(2, is_available=False), filing(3, filepath_local=None), filing(4, id="904"),
+               filing(5, filepath_local="/etc/passwd"), filing(6, filepath_local="recap/../../secret.pdf"),
+               filing(7, filepath_local="https://elsewhere.example/x.pdf"), filing(8, filepath_local="recap/a b.pdf"),
+               filing(9, short_description="", description="Long description " + "z" * 300, page_count=None,
+                      document_number=None, attachment_number=2)]
+    _, seen = sources(routes=opinion_route(filings_page(results)))
+    docs, more_left = asyncio.run(courtlistener.docket_documents(7))
+    assert more_left is False
+    params = seen[0].url.params
+    assert params["type"] == "rd" and params["q"] == "docket_id:7 AND is_available:true"
+    assert seen[0].headers["Authorization"] == "Token test-token"
+    assert [d["id"] for d in docs] == [901, 909]
+    assert docs[0] == {"id": 901, "description": "SYNTHETIC Expert report 1 & CV", "document_number": "1",
+                       "attachment_number": None, "date_filed": "2021-02-08", "page_count": 12,
+                       "filepath_local": "recap/gov.uscourts.exd.7/gov.uscourts.exd.7.1.0.pdf",
+                       "url": "https://www.courtlistener.com/docket/7/1/doe-v-example-co/"}
+    assert len(docs[1]["description"]) == 200 and docs[1]["page_count"] is None
+    assert docs[1]["document_number"] is None and docs[1]["attachment_number"] == 2
+    assert len(seen) == 1 and store.calls_since("courtlistener", 3600) == 1
+
+
+def test_docket_documents_follows_next_up_to_the_cap(sources):
+    def pages(request):
+        n = len(seen)  # one page per request, each with a next link
+        return httpx.Response(200, json=filings_page([filing(n)], cursor=f"c{n}"))
+
+    _, seen = sources(routes={"www.courtlistener.com": pages})
+    docs, more_left = asyncio.run(courtlistener.docket_documents(7))
+    assert len(seen) == courtlistener.MAX_DOC_PAGES == len(docs) and more_left is True
+    assert store.calls_since("courtlistener", 3600) == courtlistener.MAX_DOC_PAGES  # every page is a call
+    assert seen[1].url.params["cursor"] == "c1" and seen[1].url.params["type"] == "rd"  # next link as given
+    assert str(seen[2].url).startswith(courtlistener.SEARCH + "?") and "cursor=c2" in str(seen[2].url)
+
+
+def test_docket_documents_stops_at_the_last_page_and_refuses_odd_next(sources):
+    replies = [filings_page([filing(1)], cursor="c1"), filings_page([filing(2)])]
+    _, seen = sources(routes={"www.courtlistener.com": lambda request: httpx.Response(200, json=replies.pop(0))})
+    docs, more_left = asyncio.run(courtlistener.docket_documents(7))
+    assert [d["id"] for d in docs] == [901, 902] and more_left is False
+    assert len(seen) == 2
+    odd = filings_page([filing(1)]) | {"next": "https://elsewhere.example/api/?cursor=x"}  # would get the token
+    sources(routes=opinion_route(odd))
+    with pytest.raises(SourceFailed, match="unexpected response"):
+        asyncio.run(courtlistener.docket_documents(8))
+
+
+def test_document_text(sources):
+    _, seen = sources(routes=opinion_route({"plain_text": "SYNTHETIC page one\fpage two", "ocr_status": 1}))
+    assert asyncio.run(courtlistener.document_text(55)) == "SYNTHETIC page one\fpage two"
+    assert seen[0].url.path == "/api/rest/v4/recap-documents/55/"
+    assert seen[0].url.params["fields"] == "plain_text,ocr_status"
+    sources(routes=opinion_route({"plain_text": None, "ocr_status": None}))
+    assert asyncio.run(courtlistener.document_text(56)) == ""
+    sources(routes=opinion_route({"detail": "Not found."}))
+    with pytest.raises(SourceFailed, match="unexpected response"):
+        asyncio.run(courtlistener.document_text(57))
+
+
+PDF_BYTES = b"%PDF-1.4 SYNTHETIC " + b"x" * 25
+
+
+def test_download_document_streams_in_chunks_without_token(sources, monkeypatch, tmp_path):
+    monkeypatch.setattr(courtlistener, "CHUNK", 10)
+    writes = []
+    real_open = courtlistener.Path.open
+
+    class Spy:  # records every write
+        def __init__(self, f):
+            self.f = f
+
+        def write(self, chunk):
+            writes.append(len(chunk))
+            return self.f.write(chunk)
+
+        def close(self):
+            self.f.close()
+
+    def spy_open(self, *args, **kwargs):
+        return Spy(real_open(self, *args, **kwargs))
+
+    monkeypatch.setattr(courtlistener.Path, "open", spy_open)
+    _, seen = sources(routes={"storage.courtlistener.com": lambda request: httpx.Response(200, content=PDF_BYTES)})
+    dest = tmp_path / "filing.pdf"
+    path = filing(1)["filepath_local"]
+    assert asyncio.run(courtlistener.download_document(path, dest)) == len(PDF_BYTES)
+    monkeypatch.setattr(courtlistener.Path, "open", real_open)
+    assert dest.read_bytes() == PDF_BYTES and writes == [10, 10, 10, 10, 4]
+    assert str(seen[0].url) == courtlistener.STORAGE + path
+    assert "Authorization" not in seen[0].headers
+    assert store.calls_since("courtlistener", 3600) == 0  # not an API call
+    assert "courtlistener_storage" in http.RATES
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", "recap/../x.pdf", "https://elsewhere.example/x.pdf",
+                                  "recap/a b.pdf", "", None, ".hidden/x.pdf"])
+def test_download_document_refuses_odd_paths(sources, tmp_path, path):
+    _, seen = sources()
+    with pytest.raises(SourceFailed, match="unexpected file path"):
+        asyncio.run(courtlistener.download_document(path, tmp_path / "x.pdf"))
+    assert seen == [] and not (tmp_path / "x.pdf").exists()
+
+
+async def broken_body():
+    yield b"%PDF-1.4 partial"
+    raise httpx.ReadError("connection reset")
+
+
+@pytest.mark.parametrize(("route", "says"), [
+    (lambda request: httpx.Response(404, content=b"missing"), "storage HTTP 404"),
+    (lambda request: httpx.Response(200, content=broken_body()), "network error or timeout"),
+    (lambda request: httpx.Response(302, headers={"Location": "https://elsewhere.example/x.pdf"}), "redirected"),
+])
+def test_download_document_failures_leave_no_file(sources, tmp_path, route, says):
+    elsewhere = {"elsewhere.example": lambda request: httpx.Response(200, content=PDF_BYTES)}
+    sources(routes={"storage.courtlistener.com": route} | elsewhere)
+    dest = tmp_path / "filing.pdf"
+    with pytest.raises(SourceFailed, match=says):
+        asyncio.run(courtlistener.download_document(filing(1)["filepath_local"], dest))
+    assert not dest.exists()

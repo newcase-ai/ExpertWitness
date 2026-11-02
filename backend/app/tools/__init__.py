@@ -9,6 +9,7 @@ import inspect
 import json
 import mimetypes
 import pkgutil
+import re
 import time
 import typing
 from collections.abc import Awaitable, Callable
@@ -37,7 +38,6 @@ DETAIL_MAX = 200  # characters of an activity detail (ctx.log)
 ARG_MAX = 100  # characters of each string argument kept in an activity row
 ANSWER_MAX = 500  # characters of each string in an ask_model answer (unless the schema says less)
 FILE_MAX = 20 * 1024 * 1024  # bytes per saved file
-FILES_PER_JOB = 30
 FILE_TEXT_MAX = 60_000
 # Read through their own source clients and tools, never fetched as pages (gotchas 5, 11, 40).
 API_HOSTS = ("courtlistener.com", "openalex.org", "crossref.org", "oig.hhs.gov")
@@ -100,8 +100,14 @@ def strings(value) -> list[str]:
     return []
 
 
+# Our own ids (store.new_id: prefix + 16 hex) can hold 12+ digits in a row, which looks like a card number.
+# Only ids with an a-f letter are exempt: an all-digit one (~0.05%) could be a card number after a prefix.
+OWN_IDS = re.compile(r"\b(cand|dos|file|fnd|job|srch)_(?=\d*[a-f])[0-9a-f]{16}\b")
+
+
 def secret(text: str) -> bool:
-    return memory.looks_secret(text, url=text.startswith(("http://", "https://")))
+    """True if `text` looks like a secret (memory.looks_secret); the app's own ids never do."""
+    return memory.looks_secret(OWN_IDS.sub(" ", text), url=text.startswith(("http://", "https://")))
 
 
 def hide(text: str | None) -> str | None:
@@ -217,26 +223,59 @@ class Ctx:
 
     def save_file(self, url: str, data: bytes, mime: str, text: str | None = None) -> str:
         """Store downloaded bytes (and a text version, if given) under data/files/<dossier_id>/ and
-        return the new file_id. Raises ValueError for a refused URL, a file over FILE_MAX or more than
-        FILES_PER_JOB files."""
+        return the new file_id. Raises ValueError for a refused URL or a file over FILE_MAX."""
         if refusal := self.fetch_ok(url):
             raise ValueError(refusal)
         if len(data) > FILE_MAX:
             raise ValueError("file too large")
-        if len(memory.files(self.dossier_id)) >= FILES_PER_JOB:
-            raise ValueError("file limit reached for this job")
-        file_id = store.new_id("file")
-        folder = Path(get_settings().database_path).parent / "files" / self.dossier_id
-        folder.mkdir(parents=True, exist_ok=True)
-        path = folder / f"{file_id}{mimetypes.guess_extension(mime) or '.bin'}"
+        file_id, path = self.new_file_path(mime)
         path.write_bytes(data)
-        text_path = None
-        if text is not None:
-            text_path = folder / f"{file_id}.md"
-            text_path.write_text(text)
+        text_path = self.write_text(file_id, text)
         memory.add_file(file_id, self.dossier_id, url, str(path), text_path and str(text_path), mime,
                         len(data))
         return file_id
+
+    async def keep_file(self, url: str, path: Path, mime: str, text: str | None = None,
+                        file_id: str | None = None) -> str:
+        """Move an already-downloaded file (a court filing streamed to a temp path) into this dossier's
+        files, with its text version, and return the file_id (`file_id` if given). No size cap; the
+        file is never read into memory and disk work runs on a thread. Raises ValueError for a URL that
+        is not http(s) or is on a gotcha 2 site. API hosts are allowed: court files come from
+        CourtListener on purpose (gotcha 40 is about page fetches). On any failure after the move,
+        both new paths are removed (no orphan file)."""
+        if not url.startswith(("http://", "https://")) or not host_of(url):
+            raise ValueError(NOT_HTTP)
+        if is_blocked(url):
+            raise ValueError(BANNED_SITE)
+        file_id, dest = self.new_file_path(mime, file_id)
+        await asyncio.to_thread(Path(path).replace, dest)
+        try:
+            text_path = await asyncio.to_thread(self.write_text, file_id, text)
+            memory.add_file(file_id, self.dossier_id, url, str(dest), text_path and str(text_path), mime,
+                            dest.stat().st_size)
+        except BaseException:
+            dest.unlink(missing_ok=True)
+            (dest.parent / f"{file_id}.md").unlink(missing_ok=True)
+            raise
+        return file_id
+
+    def files_folder(self) -> Path:
+        """data/files/<dossier_id>/ (next to the database, gotcha 8), created if missing."""
+        folder = Path(get_settings().database_path).parent / "files" / self.dossier_id
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def new_file_path(self, mime: str, file_id: str | None = None) -> tuple[str, Path]:
+        file_id = file_id or store.new_id("file")
+        return file_id, self.files_folder() / f"{file_id}{mimetypes.guess_extension(mime) or '.bin'}"
+
+    def write_text(self, file_id: str, text: str | None) -> Path | None:
+        """The text version of a saved file (<file_id>.md next to it), if there is one."""
+        if text is None:
+            return None
+        text_path = self.files_folder() / f"{file_id}.md"
+        text_path.write_text(text)
+        return text_path
 
     def file_text(self, file_id: str, max_chars: int = FILE_TEXT_MAX) -> str:
         """The text version of a saved file of this dossier ("" if none)."""

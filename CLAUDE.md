@@ -124,3 +124,11 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 50. `no_secret`'s card check (13-19 digits, dashes allowed, Luhn) also hit ~1 in 9 Springer DOIs (`10.1007/s00415-019-09213-x`), not just ORCIDs and ISBN-13: all three are exempted in `memory.NOT_CARDS`; a fact dropped as "looks like a secret" is silent apart from a gap.
 51. ruff 0.17 flags a `list[str] = []` tool default (B006) even though pyproject selects only "I": keep `= []` with `# noqa: B006` (never mutate it); ADK then declares a plain string array with `default: []`, while `list[str] | None = None` would put a null type in the schema.
 52. Firecrawl PDF `metadata.numPages` is the pages parsed (capped by `parsers[].maxPages`); the true count is `totalPages` (may be missing): tool 7 reports `totalPages` first.
+53. CourtListener storage PDFs (`storage.courtlistener.com/<filepath_local>`) need no token and are not API calls: send the token only to the API (`SEARCH`) URLs; they have their own rate limit (`courtlistener_storage`).
+54. Docket filings: query `type=rd`, `q=docket_id:<n> AND is_available:true`; unfiltered result pages are mostly non-public filings.
+55. pypdf given a path reads the whole file into memory: pass an open file instead (court files have no size cap).
+56. rapidocr 3.x needs onnxruntime installed separately; rapidocr_onnxruntime 1.x will not install on Python 3.13+.
+57. ruff ASYNC230 flags opening a file in async code: do file work in `asyncio.to_thread`.
+58. `Ctx.keep_file` skips the `API_HOSTS` rule on purpose (court files come from CourtListener): never use it for page fetches (gotcha 40).
+59. A tool reply over `RESULT_MAX` is dropped whole by the wrapper: replies with file or case lists must be capped or cut (`court_records` uses `fit`).
+60. `store.new_id` ids (prefix + 16 hex) could hold 12+ digits in a row and failed the card check (~1 in 30 court files dropped): `new_id` now never returns an all-digit id, and `tools.secret` blanks our ids (`tools.OWN_IDS`, only with an a-f letter, so a card number after a prefix is still caught).

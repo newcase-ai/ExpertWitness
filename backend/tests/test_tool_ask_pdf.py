@@ -72,11 +72,12 @@ def test_sends_only_the_asked_pages_with_question_and_context(tool_ctx, adk_mode
 
 def test_bad_calls_come_back_as_errors_the_agent_can_fix(tool_ctx, adk_model):
     file_id = add_pdf(tool_ctx)
-    for start, end in ((0, 5), (5, 4), (25, 31)):
+    for start, end in ((0, 5), (5, 4), (31, 40)):
         reply = ask(tool_ctx, file_id=file_id, page_start=start, page_end=end)
         assert reply == {"error": f"bad page range {start}-{end}: the file has 30 pages, so use "
-                                  "1 <= page_start <= page_end <= 30"}
-    assert ask(tool_ctx, file_id="file_nope", page_start=1, page_end=2)["error"].startswith("unknown file")
+                                  "1 <= page_start <= 30 and page_start <= page_end"}
+    assert ask(tool_ctx, file_id="file_nope", page_start=1, page_end=2) == {
+        "error": f"unknown file: use one of this expert's file_ids: {file_id} ({TEST_FILE_URL})"}
     page = add_pdf(tool_ctx, data=b"<html>SYNTHETIC</html>", mime="text/html")
     assert ask(tool_ctx, file_id=page, page_start=1, page_end=2) == {
         "error": "not a PDF (text/html): this tool reads PDFs only"}
@@ -106,3 +107,20 @@ def test_model_failure_tells_the_agent_to_try_fewer_pages(tool_ctx, adk_model):
     assert rows(tool_ctx)[-1][1] == "refused"
     adk_model.script = [RuntimeError("SYNTHETIC login expired")]  # fewer pages would not help
     assert ask(tool_ctx, file_id=file_id, page_start=1, page_end=30) == {"error": "model call failed (RuntimeError)."}
+
+
+def test_page_end_past_the_last_page_is_clamped(tool_ctx, adk_model):
+    file_id = add_pdf(tool_ctx, pages=30)
+    adk_model.script = ["SYNTHETIC answer (page 30)."]
+    reply = ask(tool_ctx, file_id=file_id, page_start=21, page_end=500)
+    assert reply == {"answer": "SYNTHETIC answer (page 30).", "pages": "21-30", "page_count": 30}
+    assert "Pages 21-30 of a 30-page file" in adk_model.seen[0].contents[-1].parts[0].text
+
+
+def test_unknown_file_lists_court_file_titles(tool_ctx, adk_model):
+    file_id = add_pdf(tool_ctx)
+    tool_ctx.add_finding("court_file", "SYNTHETIC Expert report of Alex Rivera", "https://www.courtlistener.com/docket/1/2/x/",
+                         facts={"file_id": file_id})
+    reply = ask(tool_ctx, file_id="file_made_up", page_start=1, page_end=2)
+    assert reply == {"error": f"unknown file: use one of this expert's file_ids: {file_id} "
+                              "(SYNTHETIC Expert report of Alex Rivera)"}

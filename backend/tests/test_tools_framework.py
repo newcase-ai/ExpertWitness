@@ -225,9 +225,6 @@ def test_files_on_disk_with_limits(tool_ctx, monkeypatch, tmp_path):
     monkeypatch.setattr(tools, "FILE_MAX", 10)
     with pytest.raises(ValueError, match="too large"):
         tool_ctx.save_file("https://example.edu/big.pdf", b"x" * 11, "application/pdf")
-    monkeypatch.setattr(tools, "FILES_PER_JOB", 1)
-    with pytest.raises(ValueError, match="file limit"):
-        tool_ctx.save_file("https://example.edu/two.pdf", b"x", "application/pdf")
 
 
 def test_page_text_never_stored(tool_ctx, register_tool, tmp_path):

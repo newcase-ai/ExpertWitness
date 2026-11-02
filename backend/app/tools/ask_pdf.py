@@ -15,6 +15,8 @@ from app.tools import Ctx, tool
 
 ANSWER_MAX = 2_000
 NOT_FOUND = "NOT IN PAGES"
+TITLE_SHOWN = 60
+FILES_TEXT_MAX = 4_000  # characters of the file list in an unknown-file refusal
 NO_TEXT = "these pages have no text (a scanned PDF?): this tool reads PDFs with a text layer only"
 
 INSTRUCTIONS = f"""You are handed the text of some pages of a PDF about an expert witness, plus a
@@ -25,43 +27,63 @@ home addresses, family or health details. Reply in your own words, at most 5 sen
 page numbers. If these pages do not answer the question, reply exactly: {NOT_FOUND}"""
 
 
-def pages_text(path: str, page_start: int, page_end: int) -> tuple[str | None, int]:
-    """(the text of pages page_start..page_end, each under a "[Page N]" line; the file's page count).
-    None when the range is outside the file, "" when none of the pages has text."""
+def pages_text(path: str, page_start: int, page_end: int) -> tuple[str | None, int, int]:
+    """(the text of pages page_start..page_end, each under a "[Page N]" line; the file's page count;
+    the last page read: page_end, clamped to the page count). None when page_start is outside the
+    file or after page_end, "" when none of the pages has text."""
     reader = PdfReader(path)
     count = len(reader.pages)
-    if not 1 <= page_start <= page_end <= count:
-        return None, count
+    if not 1 <= page_start <= min(page_end, count):
+        return None, count, page_end
+    page_end = min(page_end, count)
     numbers = range(page_start, page_end + 1)
     texts = [(reader.pages[n - 1].extract_text() or "").strip() for n in numbers]
     if not any(texts):
-        return "", count
-    return "\n\n".join(f"[Page {n}]\n{text}" for n, text in zip(numbers, texts)), count
+        return "", count, page_end
+    return "\n\n".join(f"[Page {n}]\n{text}" for n, text in zip(numbers, texts)), count, page_end
+
+
+def known_files(ctx: Ctx) -> str:
+    """The dossier's file ids with short titles (a court file's finding title, else its link), cut to
+    fit a refusal: fixed format."""
+    titles = {f.facts.get("file_id"): f.title for f in ctx.findings("court_file")}
+    items = [f"{r['file_id']} ({(titles.get(r['file_id']) or r['source_url'])[:TITLE_SHOWN]})"
+             for r in memory.files(ctx.dossier_id)]
+    shown, size = [], 0
+    for item in items:
+        if size + len(item) > FILES_TEXT_MAX:
+            break
+        shown.append(item)
+        size += len(item) + 2
+    more = f" and {len(items) - len(shown)} more" if len(items) > len(shown) else ""
+    return "; ".join(shown) + more if items else "none saved yet"
 
 
 @tool(label="Ask a file", cap=10)
 async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, question: str,
                   context: str = "") -> dict:
     """Ask one question about pages page_start to page_end (1-based, both included) of one saved
-    PDF (file_id from download_file). Think of this tool as a person who is handed only those pages,
-    your context and your question, and nothing else: they read the pages and answer from them. So
+    PDF (file_id from download_file, or from the `files` that court_records / court_case saved). A
+    page_end past the last page is read up to the last page, so you need not know the page count
+    first. Think of this tool as a person who is handed only those pages, your context and your question, and nothing else: they read the pages and answer from them. So
     give good context: who the expert is, what you are looking for and why, and what you already
     found or ruled out (e.g. "pages 1-100 had no list of prior cases"). Keep the range to about
     100 pages: a bigger range can go over the model's token limit and fail. To search a long file, call
     again with the next range. `answer` is null when these pages do not answer; `page_count` is the
-    file's number of pages. An `error` says what to fix before calling again."""
+    file's number of pages and `pages` the range actually read. An `error` says what to fix before
+    calling again."""
     row = memory.file(file_id)
     if not row or row["dossier_id"] != ctx.dossier_id:
-        return refuse("unknown file: use a file_id from download_file")
+        return refuse(f"unknown file: use one of this expert's file_ids: {known_files(ctx)}")
     if row["mime"] != "application/pdf":
         return refuse(f"not a PDF ({row['mime']}): this tool reads PDFs only")
     try:
-        text, count = await asyncio.to_thread(pages_text, row["path"], page_start, page_end)
+        text, count, page_end = await asyncio.to_thread(pages_text, row["path"], page_start, page_end)
     except PyPdfError:
         return refuse("the PDF cannot be read (damaged or password protected)")
     if text is None:
         return refuse(f"bad page range {page_start}-{page_end}: the file has {count} pages, so use "
-                      f"1 <= page_start <= page_end <= {count}")
+                      f"1 <= page_start <= {count} and page_start <= page_end")
     if not text:
         return refuse(NO_TEXT)
     prompt = (f"Question: {question}\n\nContext from the researcher: {context or 'none'}\n\n"

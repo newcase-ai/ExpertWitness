@@ -93,7 +93,10 @@ def now() -> str:
 
 
 def new_id(prefix: str) -> str:
-    return f"{prefix}_{secrets.token_hex(8)}"
+    """prefix + 16 hex, never all digits: an all-digit id looks like a card number (gotcha 60)."""
+    while (token := secrets.token_hex(8)).isdigit():
+        pass
+    return f"{prefix}_{token}"
 
 
 _ready: set[str] = set()  # database paths whose tables exist

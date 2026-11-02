@@ -16,6 +16,7 @@ TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 RATES = {
     "openalex": 10.0,
     "courtlistener": 5 / 60,  # hour/day caps are counted with store.record_call/calls_since
+    "courtlistener_storage": 2.0,  # PDF downloads from storage.courtlistener.com: not API calls
     "crossref": 5.0,  # public pool, single records; app/sources/crossref.py also sends 1 at a time
     "oig_leie": 1.0,  # one CSV download a month at most
     "firecrawl": 8 / 60,  # hosted Free plan allows 10 scrapes/min (docs.firecrawl.dev/rate-limits)
