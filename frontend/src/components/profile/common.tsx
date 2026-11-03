@@ -35,7 +35,7 @@ export function Disclaimer({ className }: { className?: string }) {
 export function SubHeading({ note, children }: { note?: string; children: React.ReactNode }) {
   return (
     <div className="mb-3">
-      <h3 className="text-[15px] font-semibold">{children}</h3>
+      <h3 className="font-serif text-[17px] font-semibold">{children}</h3>
       {note && <p className="mt-0.5 text-[13px] text-muted-foreground">{note}</p>}
     </div>
   )

@@ -28,7 +28,30 @@
   * {
     @apply border-border;
   }
+  html {
+    /* keep room for the scrollbar on short pages too, so the top bar does not shift between pages */
+    scrollbar-gutter: stable;
+  }
   body {
     @apply bg-[#F5F6F8] font-sans text-foreground;
+  }
+}
+
+@keyframes pulse-ring {
+  from {
+    transform: scale(0.6);
+    opacity: 0.35;
+  }
+  to {
+    transform: scale(1.6);
+    opacity: 0;
+  }
+}
+
+@layer utilities {
+  /* the dot grid behind the search pages */
+  .bg-dots {
+    background-image: radial-gradient(hsl(var(--border)) 1px, transparent 1px);
+    background-size: 18px 18px;
   }
 }

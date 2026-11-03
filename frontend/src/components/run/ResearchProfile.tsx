@@ -1,11 +1,11 @@
 import { useState, type ReactNode } from 'react'
-import { LoaderCircle } from 'lucide-react'
-import { CARD, Disclaimer, Sources, SubHeading } from '@/components/profile/common'
+import { CARD, Disclaimer, Pending, Sources, SubHeading } from '@/components/profile/common'
 import { FactGrid } from '@/components/profile/FactGrid'
 import { CaseList, LitigationTimeline } from '@/components/profile/Litigation'
 import { EntryList, QualificationHighlights } from '@/components/profile/lists'
 import { ThingsToKnow } from '@/components/profile/ThingsToKnow'
 import type { ResearchProfile as Profile } from '@/lib/research-profile'
+import { LoaderCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const TABS = [
@@ -18,12 +18,22 @@ const TABS = [
 ] as const
 type Tab = (typeof TABS)[number][0]
 
-const Empty = ({ running }: { running: boolean }) => (
-  <p className="text-sm text-muted-foreground">{running ? 'Still researching…' : 'Nothing found.'}</p>
-)
+// A section with no data yet: a skeleton while the run is going, else "Nothing found."
+const Empty = ({ running }: { running: boolean }) =>
+  running ? <Pending /> : <p className="text-sm text-muted-foreground">Nothing found.</p>
 
 // A research run's profile in the product's design (components/profile), from real backend data.
-export function ResearchProfile({ p, running, actions }: { p: Profile; running: boolean; actions?: ReactNode }) {
+export function ResearchProfile({
+  p,
+  running,
+  now,
+  actions,
+}: {
+  p: Profile
+  running: boolean
+  now?: string // the latest tool call's label, while running
+  actions?: ReactNode
+}) {
   const [tab, setTab] = useState<Tab>('overview')
   const count = (i: string) => p.cases.filter((c) => c.involvement === i).length
   const tiles = [
@@ -35,21 +45,25 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
 
   return (
     <div>
-      <div className="border-b bg-card">
-        <div className="mx-auto flex max-w-[1120px] flex-col gap-5 px-4 pt-6">
-          <div className="flex flex-wrap items-center gap-4">
-            <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-[#EEF0FA] text-lg font-bold text-primary">
-              {p.initials}
-            </span>
-            <div className="min-w-0 flex-[1_1_320px] space-y-1">
-              <h1 className="text-[22px] font-semibold">{p.name}</h1>
-              <p className="text-sm text-muted-foreground">
-                {[p.title, p.contact.find((c) => c.label === 'Based in')?.value].filter(Boolean).join(' · ')}
-              </p>
+      <div className="mx-auto flex max-w-[1120px] flex-col gap-6 px-4 pt-10">
+        <div className="flex flex-wrap items-center gap-4">
+          <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-primary/10 font-serif text-xl font-semibold text-primary">
+            {p.initials}
+          </span>
+          <div className="min-w-0 flex-[1_1_320px]">
+            <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Expert profile</p>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="font-serif text-[34px] font-semibold leading-tight tracking-tight">{p.name}</h1>
             </div>
-            {actions}
+            <p className="text-sm text-muted-foreground">
+              {[p.title, p.contact.find((c) => c.label === 'Based in')?.value].filter(Boolean).join(' · ')}
+            </p>
           </div>
-          <div role="tablist" aria-label="Profile sections" className="-mb-px flex gap-1 overflow-x-auto">
+          {actions}
+        </div>
+        {running && <ResearchingPanel now={now} />}
+        <div className="overflow-x-auto">
+          <div role="tablist" aria-label="Profile sections" className="inline-flex gap-0.5 rounded-[10px] border bg-card/80 p-[3px] backdrop-blur-md">
             {TABS.map(([id, label]) => (
               <button
                 key={id}
@@ -58,10 +72,10 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
                 aria-selected={tab === id}
                 onClick={() => setTab(id)}
                 className={cn(
-                  'whitespace-nowrap border-b-2 px-3 py-2.5 text-sm',
+                  'whitespace-nowrap rounded-lg px-3.5 py-1.5 text-[13px] font-medium',
                   tab === id
-                    ? 'border-primary font-semibold text-foreground'
-                    : 'border-transparent font-medium text-muted-foreground hover:text-foreground'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:text-foreground'
                 )}
               >
                 {label}
@@ -71,24 +85,17 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
         </div>
       </div>
 
-      {running && (
-        <div role="status" className="flex items-center gap-2 border-b border-[#DDE1F5] bg-[#EEF0FA] px-6 py-2.5 text-sm text-[#1C2766]">
-          <LoaderCircle className="size-4 animate-spin" />
-          <span className="font-semibold">Research in progress</span>
-          <span>Sections fill in as we find them.</span>
-        </div>
-      )}
 
       <div className="mx-auto max-w-[1120px] px-4 py-6 pb-12 @container">
         {tab === 'overview' && (
           <div className="grid gap-4 @3xl:grid-cols-3">
             <section className={cn(CARD, 'space-y-4 @3xl:col-span-2')}>
-              <h2 className="text-base font-semibold">Summary</h2>
+              <h2 className="font-serif text-lg font-semibold">Summary</h2>
               {p.qualifications ? <p className="text-[15px] leading-7">{p.qualifications}</p> : <Empty running={running} />}
               <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
                 {tiles.map(([n, label]) => (
                   <div key={label}>
-                    <div className="text-xl font-semibold">{n}</div>
+                    <div className="font-serif text-2xl font-semibold">{n}</div>
                     <div className="text-[13px] text-muted-foreground">{label}</div>
                   </div>
                 ))}
@@ -96,12 +103,12 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
             </section>
             <ThingsToKnow p={p} />
             <section className={cn(CARD, '@3xl:col-span-2')}>
-              <h2 className="mb-3 text-base font-semibold">Key facts</h2>
+              <h2 className="mb-3 font-serif text-lg font-semibold">Key facts</h2>
               {p.highlights.length ? <QualificationHighlights facts={p.highlights} /> : <Empty running={running} />}
             </section>
             <section className={cn(CARD, '@3xl:col-span-3')}>
               <div className="mb-1 flex items-baseline justify-between gap-3">
-                <h2 className="text-base font-semibold">Recent cases</h2>
+                <h2 className="font-serif text-lg font-semibold">Recent cases</h2>
                 {p.cases.length > 3 && (
                   <button type="button" onClick={() => setTab('cases')} className="text-sm font-medium text-primary hover:underline">
                     All {p.cases.length} cases
@@ -132,7 +139,7 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
         {tab === 'background' && (
           <section className={CARD}>
             <SubHeading note="Court records, federal exclusion lists and publication records">Discipline &amp; background</SubHeading>
-            <FactGrid facts={p.risk} />
+            {p.risk.length ? <FactGrid facts={p.risk} /> : <Empty running={running} />}
           </section>
         )}
 
@@ -171,6 +178,26 @@ export function ResearchProfile({ p, running, actions }: { p: Profile; running: 
             <Disclaimer />
           </section>
         )}
+      </div>
+    </div>
+  )
+}
+
+// While the run is going: a spinner and what the agent is doing now.
+function ResearchingPanel({ now }: { now?: string }) {
+  return (
+    <div
+      role="status"
+      className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-primary/30 bg-card px-5 py-4 shadow-[0_10px_30px_-18px_rgb(20_30_80/0.35)]"
+    >
+      <span className="grid size-10 shrink-0 place-items-center rounded-full bg-primary/10 text-primary">
+        <LoaderCircle className="size-5 animate-spin motion-reduce:animate-none" />
+      </span>
+      <div className="min-w-0 flex-[1_1_240px]">
+        <p className="text-[15px] font-semibold">Researching this expert…</p>
+        <p className="truncate text-[13px] text-muted-foreground">
+          {now ? `Now: ${now}` : 'Starting up'} · Sections fill in as we find them.
+        </p>
       </div>
     </div>
   )

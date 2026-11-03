@@ -130,7 +130,7 @@ export default function ExpertResearchLivePage() {
   )
   if (!debug)
     return (
-      <div className="min-h-screen">
+      <div className="bg-dots min-h-screen">
         <AppHeader />
         {error && (
           <p role="alert" className="mx-auto mt-4 max-w-[1120px] rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
@@ -138,7 +138,12 @@ export default function ExpertResearchLivePage() {
           </p>
         )}
         {view ? (
-          <ResearchProfile p={view} running={running} actions={debugToggle} />
+          <ResearchProfile
+            p={view}
+            running={running}
+            now={job?.activity.at(-1)?.label}
+            actions={debugToggle}
+          />
         ) : (
           !error && <p className="mx-auto max-w-[1120px] px-4 pt-10 text-sm text-muted-foreground">Loading profile…</p>
         )}

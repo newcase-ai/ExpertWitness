@@ -3,10 +3,10 @@
 // without searching again.
 import { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { LoaderCircle } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
+import NameSearch from '@/components/search/NameSearch'
+import SearchingPulse from '@/components/search/SearchingPulse'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { cn } from '@/lib/utils'
 import { ExpertCandidate, loadSearch, SearchQuery, startResearch, startSearch } from '@/lib/api'
 
@@ -51,154 +51,82 @@ export default function ExpertSearchPage() {
   }
 
   return (
-    <div className="min-h-screen text-sm">
+    <div className="bg-dots min-h-screen text-sm">
       <AppHeader />
       {!searchId ? (
-        <main className="mx-auto flex max-w-[640px] flex-col gap-6 px-4 pb-12 pt-24">
-          <div className="space-y-1.5">
-            <h1 className="font-serif text-[28px] font-semibold tracking-tight">
-              Find an expert witness
-            </h1>
-            <p className="text-muted-foreground">
-              We look them up across the web, court records and licensing boards.
-            </p>
+        <main className={HERO}>
+          <Eyebrow />
+          <h1 className={HEADLINE}>
+            Know your expert
+            <br />
+            before they testify.
+          </h1>
+          <p className="max-w-[48ch] text-[15px] text-muted-foreground">
+            Find the person, then get a cited profile: cases, rulings, fees and red flags.
+          </p>
+          <NameSearch initial={query} onSearch={search} className="mt-6" />
+          <div className="flex flex-wrap justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+            {['Web', 'Federal court opinions', 'Publications'].map((s) => (
+              <span key={s}>
+                <span className="font-bold text-[#1D5B40]">✓</span> {s}
+              </span>
+            ))}
           </div>
-          <SearchForm initial={query} onSearch={search} />
           {results?.key === '' && 'error' in results && (
             <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
               {results.error}
             </p>
           )}
         </main>
+      ) : results?.key !== searchId ? (
+        // the same hero as the start page, so starting a search feels like the page moving on
+        <main className={HERO}>
+          <Eyebrow />
+          <SearchingPulse name={query.name} headline={HEADLINE} />
+        </main>
       ) : (
-        <main className="mx-auto flex max-w-[800px] flex-col gap-5 px-4 pb-12 pt-8">
-          <SearchForm key={key} initial={query} onSearch={search} compact />
-          {results?.key !== searchId ? (
-            <p role="status" className="flex items-center gap-2 text-muted-foreground">
-              <LoaderCircle className="size-4 animate-spin text-primary" /> Searching for{' '}
-              {query.name}…
-            </p>
-          ) : 'error' in results ? (
-            <p
-              role="alert"
-              className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800"
-            >
-              {results.error}
-            </p>
-          ) : results.people.length ? (
-            <CandidateList query={query} people={results.people} />
-          ) : (
-            <p className="rounded-xl border bg-card px-5 py-4 text-muted-foreground">
-              No expert witness named {query.name} turned up. Check the spelling, or try without the
-              specialty or city.
-            </p>
-          )}
+        <main className="px-4 pb-16 pt-12">
+          <div className="mx-auto flex max-w-[800px] flex-col gap-5">
+            <div className="flex flex-col gap-1">
+              <Eyebrow />
+              <NameSearch key={key} initial={query} onSearch={search} focus={false} className="mt-2 max-w-none" />
+            </div>
+            {'error' in results ? (
+              <p
+                role="alert"
+                className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800"
+              >
+                {results.error}
+              </p>
+            ) : results.people.length ? (
+              <CandidateList people={results.people} />
+            ) : (
+              <p className="rounded-xl border bg-card px-5 py-4 text-muted-foreground">
+                No expert witness named {query.name} turned up. Check the spelling, or try without
+                the specialty or city.
+              </p>
+            )}
+          </div>
         </main>
       )}
     </div>
   )
 }
 
-function SearchForm({
-  initial,
-  onSearch,
-  compact,
-}: {
-  initial: SearchQuery
-  onSearch: (q: SearchQuery) => void
-  compact?: boolean
-}) {
-  const [q, setQ] = useState(initial)
-  const field = (k: keyof SearchQuery) => ({
-    value: q[k],
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => setQ({ ...q, [k]: e.target.value }),
-  })
+// The start page's hero, shared by the searching view.
+const HERO = 'flex flex-col items-center gap-5 px-4 pb-16 pt-24 text-center'
+const HEADLINE =
+  'text-balance font-serif text-[40px] font-semibold leading-[1.1] tracking-tight max-sm:text-[30px]'
 
-  if (compact)
-    return (
-      <form
-        className="flex flex-wrap gap-2"
-        onSubmit={(e) => {
-          e.preventDefault()
-          onSearch(q)
-        }}
-      >
-        <Field label="Full name" className="flex-[2_1_220px]">
-          <Input {...field('name')} required className="bg-card" />
-        </Field>
-        <Field label="Specialty" className="flex-[1_1_150px]">
-          <Input {...field('specialty')} placeholder="Any" className="bg-card" />
-        </Field>
-        <Field label="City or state" className="flex-[1_1_150px]">
-          <Input {...field('location')} placeholder="Anywhere" className="bg-card" />
-        </Field>
-        <Button type="submit" variant="outline" className="self-end">
-          Update
-        </Button>
-      </form>
-    )
-
+function Eyebrow() {
   return (
-    <form
-      className="flex flex-col gap-3.5 rounded-xl border bg-card p-5"
-      onSubmit={(e) => {
-        e.preventDefault()
-        onSearch(q)
-      }}
-    >
-      <Field label="Full name" strong>
-        <Input
-          {...field('name')}
-          required
-          autoFocus
-          placeholder="e.g. Margaret Chen"
-          className="h-10 text-[15px]"
-        />
-      </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Specialty" optional>
-          <Input {...field('specialty')} placeholder="e.g. Orthopedic surgery" className="h-10" />
-        </Field>
-        <Field label="City or state" optional>
-          <Input {...field('location')} placeholder="e.g. Ohio" className="h-10" />
-        </Field>
-      </div>
-      <Button type="submit" className="h-10 self-end px-5">
-        Search
-      </Button>
-    </form>
+    <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">
+      Expert witness research
+    </p>
   )
 }
 
-function Field({
-  label,
-  optional,
-  strong,
-  className,
-  children,
-}: {
-  label: string
-  optional?: boolean
-  strong?: boolean
-  className?: string
-  children: React.ReactNode
-}) {
-  return (
-    <label className={cn('flex flex-col gap-1.5', className)}>
-      <span
-        className={cn(
-          'text-[13px]',
-          strong ? 'font-semibold' : 'font-medium text-muted-foreground'
-        )}
-      >
-        {label} {optional && <span className="font-normal">(optional)</span>}
-      </span>
-      {children}
-    </label>
-  )
-}
-
-function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCandidate[] }) {
+function CandidateList({ people }: { people: ExpertCandidate[] }) {
   const navigate = useNavigate()
   const [starting, setStarting] = useState(false)
   const research = (candidateId: string) => {
@@ -213,8 +141,8 @@ function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCa
   return (
     <>
       <div className="space-y-1">
-        <h1 className="text-xl font-semibold">
-          {people.length} possible {people.length === 1 ? 'match' : 'matches'} for {query.name}
+        <h1 className="font-serif text-[26px] font-semibold tracking-tight">
+          {people.length} possible {people.length === 1 ? 'match' : 'matches'}
         </h1>
         <p className="text-muted-foreground">
           Choose the right person and we'll research them in depth.
@@ -222,18 +150,17 @@ function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCa
       </div>
       <ul className="divide-y rounded-xl border bg-card">
         {people.map((p) => (
-          <li key={p.id} className="flex flex-wrap items-center gap-4 px-5 py-4">
-            <div className="flex min-w-0 flex-[1_1_400px] flex-col gap-1.5">
+          <li key={p.id} className="flex flex-wrap items-center gap-x-5 gap-y-3 px-5 py-4">
+            <div className="flex min-w-0 flex-[1_1_380px] flex-col gap-1">
               <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
                 <span className="text-[15px] font-semibold">{p.name}</span>
                 <span className="text-muted-foreground">
-                  {p.specialty} · {p.location}
+                  {[p.specialty, p.location].filter(Boolean).join(' · ')}
                 </span>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 text-[13px]">
                 <span
+                  title={p.matchReason}
                   className={cn(
-                    'rounded-full px-2 py-0.5 font-semibold',
+                    'whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold',
                     p.match === 'strong'
                       ? 'bg-[#E3F1EA] text-[#1D5B40]'
                       : 'bg-[#FFF1DC] text-[#7A4E00]'
@@ -241,27 +168,9 @@ function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCa
                 >
                   {p.match === 'strong' ? 'Strong match' : 'Partial match'}
                 </span>
-                <span className="text-muted-foreground">{p.matchReason}</span>
               </div>
               <p className="leading-normal text-[#2E3442]">{p.summary}</p>
-              {p.sources.length > 0 && (
-                <span className="text-[13px] text-muted-foreground">
-                  Found on{' '}
-                  {p.sources.map((s, i) => (
-                    <span key={s.url}>
-                      {i > 0 && ', '}
-                      <a
-                        href={s.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary hover:underline"
-                      >
-                        {s.label}
-                      </a>
-                    </span>
-                  ))}
-                </span>
-              )}
+              <SiteChips sources={p.sources} />
             </div>
             <Button
               variant={p.match === 'strong' ? 'default' : 'outline'}
@@ -278,5 +187,43 @@ function CandidateList({ query, people }: { query: SearchQuery; people: ExpertCa
         Not the person you're looking for? Add a specialty or city above.
       </p>
     </>
+  )
+}
+
+const SHOWN_SITES = 3
+
+// One chip per site (host without "www."), linking to the first page found there.
+function SiteChips({ sources }: { sources: ExpertCandidate['sources'] }) {
+  const sites = new Map<string, string>()
+  for (const s of sources) {
+    try {
+      const host = new URL(s.url).hostname.replace(/^www\./, '')
+      if (!sites.has(host)) sites.set(host, s.url)
+    } catch {
+      // not a URL: skip it
+    }
+  }
+  if (!sites.size) return null
+  const all = [...sites]
+  const hidden = all.slice(SHOWN_SITES).map(([host]) => host)
+  return (
+    <div className="flex flex-wrap gap-1.5 text-xs text-muted-foreground">
+      {all.slice(0, SHOWN_SITES).map(([host, url]) => (
+        <a
+          key={host}
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-md border bg-[#F5F6F8] px-1.5 py-px hover:text-primary"
+        >
+          {host}
+        </a>
+      ))}
+      {hidden.length > 0 && (
+        <span title={hidden.join(', ')} className="rounded-md border bg-[#F5F6F8] px-1.5 py-px">
+          +{hidden.length} more
+        </span>
+      )}
+    </div>
   )
 }

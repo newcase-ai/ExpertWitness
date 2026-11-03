@@ -5,9 +5,9 @@ import AppHeader from '@/components/AppHeader'
 import { JobStatus, listSearches, SearchSummary } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-// Every saved search, newest first, with the research runs started from it: whether each is still
-// running, what the agent is doing now, and links back to the results and the run. Reads only;
-// refreshes every 5 s.
+// Every research run, newest first and grouped by day: whether it is still running, what the agent is
+// doing now, and a link to the run. A search nobody was picked from yet is a row too (searching, not
+// researched, or cancelled), linking back to its results. Reads only; refreshes every 5 s.
 export default function SearchesPage() {
   const [searches, setSearches] = useState<SearchSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -30,81 +30,121 @@ export default function SearchesPage() {
     }
   }, [])
 
+  const all = searches ?? []
+  const searching = (s: SearchSummary) => s.status === 'queued' || s.status === 'running'
+  const rows: Row[] = [
+    ...all.flatMap((s) =>
+      s.research.map((r) => ({
+        key: r.dossier_id,
+        name: r.display_name,
+        status: r.status,
+        created_at: r.created_at,
+        href: `/research/${r.dossier_id}`,
+        now: r.last_activity,
+        error: r.error,
+      }))
+    ),
+    // a search nobody was picked from yet: still searching, waiting for a pick, or cancelled
+    ...all
+      .filter((s) => !s.research.length)
+      .map((s) => ({
+        key: s.search_id,
+        name: s.name,
+        status: s.status,
+        created_at: s.created_at,
+        href: resultsHref(s),
+        searching: searching(s),
+        pick: s.status === 'done' ? s.candidates : undefined,
+        error: s.status === 'failed' ? 'the search did not finish' : null,
+      })),
+  ].sort((a, b) => b.created_at.localeCompare(a.created_at))
+  const days = groupByDay(rows)
+
   return (
-    <div className="min-h-screen text-sm">
+    <div className="bg-dots min-h-screen text-sm">
       <AppHeader />
-      <main className="mx-auto flex max-w-[900px] flex-col gap-5 px-4 pb-12 pt-8">
-        <div className="space-y-1">
-          <h1 className="font-serif text-[28px] font-semibold tracking-tight">Searches</h1>
-          <p className="text-muted-foreground">
-            Every search and research run, newest first. Updates every few seconds.
-          </p>
-        </div>
-        {error && (
-          <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
-            {error}
-          </p>
-        )}
-        {!searches ? (
-          !error && (
-            <p role="status" className="flex items-center gap-2 text-muted-foreground">
-              <LoaderCircle className="size-4 animate-spin text-primary" /> Loading…
+      <main className="px-4 pb-16 pt-12">
+        <div className="mx-auto flex max-w-[900px] flex-col gap-6">
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">
+                Your research
+              </p>
+              <h1 className="font-serif text-[34px] font-semibold leading-tight tracking-tight">
+                Searches
+              </h1>
+            </div>
+            <Link
+              to="/"
+              className="rounded-lg bg-primary px-4 py-2 text-[13px] font-semibold text-primary-foreground hover:bg-primary/90"
+            >
+              New search
+            </Link>
+          </div>
+          {error && (
+            <p role="alert" className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-red-800">
+              {error}
             </p>
-          )
-        ) : !searches.length ? (
-          <p className="rounded-xl border bg-card px-5 py-4 text-muted-foreground">
-            No searches yet. <Link to="/" className="text-primary hover:underline">Find an expert</Link>
-          </p>
-        ) : (
-          <ul className="space-y-3">
-            {searches.map((s) => (
-              <li key={s.search_id} className="rounded-xl border bg-card">
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3">
-                  <span className="text-[15px] font-semibold">{s.name}</span>
-                  <Status status={s.status} />
-                  <span className="text-muted-foreground">
-                    {when(s.created_at)} · {s.candidates}{' '}
-                    {s.candidates === 1 ? 'person' : 'people'} found
-                  </span>
-                  <Link
-                    to={`/?name=${encodeURIComponent(s.name)}&search=${s.search_id}`}
-                    className="ml-auto font-medium text-primary hover:underline"
-                  >
-                    Open results
-                  </Link>
-                </div>
-                {s.research.length > 0 && (
-                  <ul className="divide-y border-t">
-                    {s.research.map((r) => (
+          )}
+          {!searches ? (
+            !error && (
+              <p role="status" className="flex items-center gap-2 text-muted-foreground">
+                <LoaderCircle className="size-4 animate-spin text-primary" /> Loading…
+              </p>
+            )
+          ) : !searches.length ? (
+            <p className="rounded-xl border bg-card px-5 py-4 text-muted-foreground">
+              No searches yet.{' '}
+              <Link to="/" className="text-primary hover:underline">
+                Find an expert
+              </Link>
+            </p>
+          ) : (
+            <>
+              {days.map(([day, dayRuns]) => (
+                <section key={day} className="flex flex-col gap-2">
+                  <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                    {day}
+                  </h2>
+                  <ul className="divide-y rounded-xl border bg-card">
+                    {dayRuns.map((r) => (
                       <li
-                        key={r.dossier_id}
-                        className="flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-2.5"
+                        key={r.key}
+                        className="flex flex-wrap items-center gap-x-4 gap-y-2 px-5 py-4"
                       >
-                        <span>Research: {r.display_name}</span>
-                        <Status status={r.status} />
-                        <span className="text-muted-foreground">
-                          {when(r.created_at)} · {r.tool_calls} tool calls · {r.findings} findings
-                        </span>
-                        <Link
-                          to={`/research/${r.dossier_id}`}
-                          className="ml-auto font-medium text-primary hover:underline"
-                        >
-                          Open run
-                        </Link>
-                        {r.status === 'running' && r.last_activity && (
-                          <span className="w-full text-muted-foreground">Now: {r.last_activity}</span>
-                        )}
-                        {r.status === 'failed' && r.error && (
-                          <span className="w-full text-red-800">Stopped: {r.error}</span>
-                        )}
+                        <div className="flex min-w-0 flex-[1_1_280px] flex-col gap-0.5">
+                          <span className="font-serif text-[19px] font-semibold leading-snug">
+                            {r.name}
+                          </span>
+                          <span className="text-[13px] text-muted-foreground">
+                            {time(r.created_at)}
+                            {r.pick !== undefined &&
+                              ` · ${r.pick} ${r.pick === 1 ? 'person' : 'people'} found`}
+                          </span>
+                          {r.status === 'running' && r.now && (
+                            <span className="text-[13px] text-[#1F4E8C]">Now: {r.now}</span>
+                          )}
+                          {r.status === 'failed' && r.error && (
+                            <span className="text-[13px] text-red-800">Cancelled: {r.error}</span>
+                          )}
+                        </div>
+                        <div className="ml-auto flex items-center gap-4">
+                          <Status status={r.status} searching={r.searching} pick={r.pick !== undefined} />
+                          <Link
+                            to={r.href}
+                            className="whitespace-nowrap font-semibold text-primary hover:underline"
+                          >
+                            {r.pick ? 'Pick →' : 'Open →'}
+                          </Link>
+                        </div>
                       </li>
                     ))}
                   </ul>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+                </section>
+              ))}
+            </>
+          )}
+        </div>
       </main>
     </div>
   )
@@ -112,24 +152,81 @@ export default function SearchesPage() {
 
 const STATUS: Record<JobStatus, { label: string; style: string }> = {
   queued: { label: 'Waiting', style: 'bg-muted text-muted-foreground' },
-  running: { label: 'Running', style: 'bg-[#E4EEFB] text-[#1F4E8C]' },
-  done: { label: 'Done', style: 'bg-[#E3F1EA] text-[#1D5B40]' },
-  failed: { label: 'Stopped', style: 'bg-red-50 text-red-800' },
+  running: { label: 'Researching', style: 'bg-[#E4EEFB] text-[#1F4E8C]' },
+  done: { label: 'Ready', style: 'bg-[#E3F1EA] text-[#1D5B40]' },
+  failed: { label: 'Cancelled', style: 'bg-red-50 text-red-800' },
 }
 
-function Status({ status }: { status: JobStatus }) {
+function Status({
+  status,
+  searching,
+  pick,
+}: {
+  status: JobStatus
+  searching?: boolean
+  pick?: boolean
+}) {
+  if (pick)
+    return (
+      <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full bg-[#FFF1DC] px-2.5 py-0.5 text-[12px] font-semibold text-[#7A4E00]">
+        <span className="size-1.5 rounded-full bg-current" />
+        Not researched
+      </span>
+    )
   return (
-    <span className={cn('rounded-full px-2 py-0.5 text-[12px] font-semibold', STATUS[status].style)}>
-      {STATUS[status].label}
+    <span
+      className={cn(
+        'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
+        STATUS[status].style
+      )}
+    >
+      <span
+        className={cn(
+          'size-1.5 rounded-full bg-current',
+          status === 'running' && 'animate-pulse motion-reduce:animate-none'
+        )}
+      />
+      {searching ? 'Searching' : STATUS[status].label}
     </span>
   )
 }
 
-function when(iso: string) {
-  return new Date(iso).toLocaleString([], {
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+// One line of the list: a research run, or a search nobody was picked from yet.
+type Row = {
+  key: string
+  name: string
+  status: JobStatus
+  created_at: string
+  href: string
+  now?: string | null
+  error?: string | null
+  searching?: boolean
+  pick?: number // a finished search nobody was picked from: how many people it found
+}
+
+const resultsHref = (s: SearchSummary) =>
+  `/?name=${encodeURIComponent(s.name)}&search=${s.search_id}`
+
+// Rows (newest first) under "Today", "Yesterday" or a date.
+function groupByDay(runs: Row[]): [string, Row[]][] {
+  const groups = new Map<string, Row[]>()
+  for (const r of runs) {
+    const day = dayLabel(r.created_at)
+    groups.set(day, [...(groups.get(day) ?? []), r])
+  }
+  return [...groups]
+}
+
+function dayLabel(iso: string) {
+  const d = new Date(iso)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+  if (d.toDateString() === today.toDateString()) return 'Today'
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday'
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })
+}
+
+function time(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
