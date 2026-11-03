@@ -75,6 +75,19 @@ class AgentRun:
     text: str = ""  # the final reply
     calls: int = 0  # model calls made
     stopped: str | None = None  # None, "step_limit" or "time_limit"
+    transcript: list[str] = field(default_factory=list)  # the run as text: replies, tool calls, results
+
+
+def transcript_lines(event) -> list[str]:
+    """One ADK event as text: the model's words, its tool calls, and the tools' results."""
+    if event.author == "user" or not event.content:
+        return []
+    text = "".join(p.text or "" for p in event.content.parts or [] if not p.thought)
+    return (([f"model: {text}"] if text.strip() else [])
+            + [f"tool call {c.name}: {json.dumps(c.args, ensure_ascii=False, default=str)}"
+               for c in event.get_function_calls()]
+            + [f"tool result {r.name}: {json.dumps(r.response, ensure_ascii=False, default=str)}"
+               for r in event.get_function_responses()])
 
 
 def check_model_name(name: str) -> str:
@@ -128,6 +141,7 @@ async def run_agent(agent: LlmAgent, prompt: str, *, max_llm_calls: int, timeout
                                       run_config=RunConfig(max_llm_calls=max_llm_calls))
             async with contextlib.aclosing(events):
                 async for event in events:
+                    out.transcript += transcript_lines(event)
                     if event.get_function_responses():
                         trace.tool_errors(agent.name, event)  # what the model was told, ADK's own refusals too
                     if event.author == "user" or not event.content or event.get_function_responses():

@@ -45,7 +45,22 @@ export default function ExpertResearchLivePage() {
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('Timeline')
   const [now, setNow] = useState(Date.now())
-  const debug = useSearchParams()[0].get('debug') === '1'
+  const [params, setParams] = useSearchParams()
+  const debug = params.get('debug') === '1'
+  const debugToggle = (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={debug}
+      onClick={() => setParams(debug ? {} : { debug: '1' })}
+      className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground"
+    >
+      Debug
+      <span className={cn('flex h-5 w-9 items-center rounded-full p-0.5 transition-colors', debug ? 'bg-primary' : 'bg-muted-foreground/30')}>
+        <span className={cn('size-4 rounded-full bg-white shadow transition-transform', debug && 'translate-x-4')} />
+      </span>
+    </button>
+  )
 
   useEffect(() => {
     let live = true
@@ -123,7 +138,7 @@ export default function ExpertResearchLivePage() {
           </p>
         )}
         {view ? (
-          <ResearchProfile p={view} running={running} />
+          <ResearchProfile p={view} running={running} actions={debugToggle} />
         ) : (
           !error && <p className="mx-auto max-w-[1120px] px-4 pt-10 text-sm text-muted-foreground">Loading profile…</p>
         )}
@@ -134,9 +149,12 @@ export default function ExpertResearchLivePage() {
     <div className="min-h-screen text-sm">
       <AppHeader />
       <main className="mx-auto flex max-w-[1200px] flex-col gap-5 px-4 pb-12 pt-8">
-        <button type="button" onClick={() => navigate('/')} className="self-start font-medium text-primary hover:underline">
-          New search
-        </button>
+        <div className="flex justify-between">
+          <button type="button" onClick={() => navigate('/')} className="font-medium text-primary hover:underline">
+            New search
+          </button>
+          {debugToggle}
+        </div>
 
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <h1 className="font-serif text-[28px] font-semibold tracking-tight">{name}</h1>

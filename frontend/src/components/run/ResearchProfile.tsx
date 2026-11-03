@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { LoaderCircle } from 'lucide-react'
 import { CARD, Disclaimer, Sources, SubHeading } from '@/components/profile/common'
 import { FactGrid } from '@/components/profile/FactGrid'
@@ -23,7 +23,7 @@ const Empty = ({ running }: { running: boolean }) => (
 )
 
 // A research run's profile in the product's design (components/profile), from real backend data.
-export function ResearchProfile({ p, running }: { p: Profile; running: boolean }) {
+export function ResearchProfile({ p, running, actions }: { p: Profile; running: boolean; actions?: ReactNode }) {
   const [tab, setTab] = useState<Tab>('overview')
   const count = (i: string) => p.cases.filter((c) => c.involvement === i).length
   const tiles = [
@@ -47,6 +47,7 @@ export function ResearchProfile({ p, running }: { p: Profile; running: boolean }
                 {[p.title, p.contact.find((c) => c.label === 'Based in')?.value].filter(Boolean).join(' · ')}
               </p>
             </div>
+            {actions}
           </div>
           <div role="tablist" aria-label="Profile sections" className="-mb-px flex gap-1 overflow-x-auto">
             {TABS.map(([id, label]) => (

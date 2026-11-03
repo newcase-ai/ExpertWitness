@@ -36,10 +36,10 @@ def squash(text: str) -> str:
     return " ".join(text.lower().split())
 
 
-def copied(text: str, snippets: str) -> bool:
-    """True if `text` holds a run of COPY_RUN+ characters found word for word in a snippet."""
+def copied(text: str, snippets: str, run: int = COPY_RUN) -> bool:
+    """True if `text` holds a run of `run`+ characters found word for word in a snippet."""
     t = squash(text)
-    return any(t[i:i + COPY_RUN] in snippets for i in range(len(t) - COPY_RUN + 1))
+    return any(t[i:i + run] in snippets for i in range(len(t) - run + 1))
 
 
 def words(text: str | None) -> set[str]:

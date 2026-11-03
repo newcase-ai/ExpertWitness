@@ -60,14 +60,27 @@ def test_sends_only_the_asked_pages_with_question_and_context(tool_ctx, adk_mode
     file_id = add_pdf(tool_ctx)
     adk_model.script = ["Testified in Doe v. Example Co. (page 22)."]
     reply = ask(tool_ctx, file_id=file_id, page_start=21, page_end=25, context="SYNTHETIC pages 1-20 had none")
-    assert reply == {"answer": "Testified in Doe v. Example Co. (page 22).", "pages": "21-25", "page_count": 30}
+    [fact] = tool_ctx.findings()
+    assert reply == {"answer": "Testified in Doe v. Example Co. (page 22).", "ref": fact.finding_id,
+                     "pages": "21-25", "page_count": 30}
     [part] = adk_model.seen[0].contents[-1].parts
     assert "Question: Which cases?" in part.text and "SYNTHETIC pages 1-20 had none" in part.text
     assert "Pages 21-25 of a 30-page file" in part.text
     assert "[Page 21]\nSYNTHETIC page 21" in part.text and "[Page 25]\nSYNTHETIC page 25" in part.text
     assert "page 20" not in part.text and "page 26" not in part.text
     assert rows(tool_ctx) == [("ask_pdf", "done", "pages 21-25 of 30")]
-    assert tool_ctx.findings() == []  # nothing saved
+    assert (fact.kind, fact.title, fact.url, fact.confidence) == ("file_fact", "Which cases?", TEST_FILE_URL, "low")
+    assert fact.facts == {"file_id": file_id, "pages": "21-25", "facts": ["Testified in Doe v. Example Co. (page 22)."]}
+
+
+def test_an_answer_copying_a_passage_is_not_saved(tool_ctx, adk_model):
+    """Case names may be copied (short runs); a copied passage of the file is never saved (gotcha 15)."""
+    passage = "SYNTHETIC " + " ".join(f"word{n}" for n in range(40))
+    file_id = tool_ctx.save_file(TEST_FILE_URL, blank_pdf(1), "application/pdf", text=f"[Page 1]\n{passage}")
+    adk_model.script = [f"Page 1 says: {passage}"]
+    reply = ask(tool_ctx, file_id=file_id, page_start=1, page_end=1)
+    assert reply["answer"] == f"Page 1 says: {passage}" and reply["ref"] is None
+    assert tool_ctx.findings() == []
 
 
 def test_bad_calls_come_back_as_errors_the_agent_can_fix(tool_ctx, adk_model):
@@ -113,7 +126,8 @@ def test_page_end_past_the_last_page_is_clamped(tool_ctx, adk_model):
     file_id = add_pdf(tool_ctx, pages=30)
     adk_model.script = ["SYNTHETIC answer (page 30)."]
     reply = ask(tool_ctx, file_id=file_id, page_start=21, page_end=500)
-    assert reply == {"answer": "SYNTHETIC answer (page 30).", "pages": "21-30", "page_count": 30}
+    assert reply == {"answer": "SYNTHETIC answer (page 30).", "ref": tool_ctx.findings()[0].finding_id,
+                     "pages": "21-30", "page_count": 30}
     assert "Pages 21-30 of a 30-page file" in adk_model.seen[0].contents[-1].parts[0].text
 
 

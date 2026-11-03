@@ -16,6 +16,7 @@ ITEMS_MAX = 12  # per section
 ITEM_MAX = 300  # characters of one item
 NEW_MAX = 40  # new findings shown to the model in one update; the rest are counted
 LINE_MAX = 300
+FACT_LINE_MAX = 2_400  # a file_fact line keeps its ask_pdf answer (2,000 characters) whole
 PER_KIND = 8  # findings of one kind in `known_so_far` before the first profile update
 CONTEXT_MAX = 8_000
 
@@ -71,7 +72,8 @@ def finding_line(f: Finding, with_id: bool = False) -> str:
             match.get("role") and f"his role: {match['role']} ({match.get('level')} match)",
             reasons[0] if reasons else None] + [x for x in facts.get("facts") or [] if isinstance(x, str)]
     line = (f"[{f.finding_id}] " if with_id else "- ") + f"{f.kind}: {f.title}" + (f" ({f.note})" if f.note else "")
-    return (line + "".join(f"; {b}" for b in bits if b))[:LINE_MAX]
+    cut = FACT_LINE_MAX if f.kind == "file_fact" else LINE_MAX
+    return (line + "".join(f"; {b}" for b in bits if b))[:cut]
 
 
 def render(profile: Profile) -> str:
