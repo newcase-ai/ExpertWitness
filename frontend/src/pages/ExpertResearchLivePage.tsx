@@ -1,10 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { Download, LoaderCircle } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
 import RunResults, { ProfileView } from '@/components/run/RunResults'
-import { ResearchProfile } from '@/components/run/ResearchProfile'
-import { toResearchProfile } from '@/lib/research-profile'
 import Timeline from '@/components/run/Timeline'
 import { clock, duration, liveFindings, runStats } from '@/lib/trace'
 import {
@@ -32,8 +30,7 @@ type Tab = (typeof TABS)[number]
 
 // One research run (/research/:dossierId), started by "Research this expert" or opened from the
 // searches list: what the agent does step by step (its trace), what it found, and the raw log.
-// Loading or reloading the page only reads the run; it never starts one. The searcher sees the
-// profile only; ?debug=1 shows the run itself (trace, findings, gaps, raw log).
+// Loading or reloading the page only reads the run; it never starts one.
 export default function ExpertResearchLivePage() {
   const navigate = useNavigate()
   const { dossierId = '' } = useParams()
@@ -45,7 +42,6 @@ export default function ExpertResearchLivePage() {
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('Timeline')
   const [now, setNow] = useState(Date.now())
-  const debug = useSearchParams()[0].get('debug') === '1'
 
   useEffect(() => {
     let live = true
@@ -108,27 +104,6 @@ export default function ExpertResearchLivePage() {
   const elapsed = started ? (job?.finished_at ? Date.parse(job.finished_at) : now) - started : null
   const status = STATUS[job?.status ?? 'queued'] ?? STATUS.queued
   const toolCalls = Object.values(stats.tools).reduce((a, b) => a + b, 0)
-
-  const view = useMemo(
-    () => profile && toResearchProfile(name, profile, findings, job?.activity ?? []),
-    [name, profile, findings, job]
-  )
-  if (!debug)
-    return (
-      <div className="min-h-screen">
-        <AppHeader />
-        {error && (
-          <p role="alert" className="mx-auto mt-4 max-w-[1120px] rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </p>
-        )}
-        {view ? (
-          <ResearchProfile p={view} running={running} />
-        ) : (
-          !error && <p className="mx-auto max-w-[1120px] px-4 pt-10 text-sm text-muted-foreground">Loading profile…</p>
-        )}
-      </div>
-    )
 
   return (
     <div className="min-h-screen text-sm">

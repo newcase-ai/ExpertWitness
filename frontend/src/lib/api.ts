@@ -86,7 +86,7 @@ export interface ResearchJob {
   started_at: string | null
   finished_at: string | null
   steps: { key: string; label: string; status: string; detail: string | null }[]
-  activity: { seq: number; tool: string; label: string; status: string; detail: string | null }[]
+  activity: { seq: number; label: string; status: string; detail: string | null }[]
 }
 
 // One step of a research run's trace (backend app/trace.py): a model turn, a tool call starting or
