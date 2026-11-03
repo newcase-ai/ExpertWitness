@@ -57,7 +57,7 @@ export default function SearchingPulse({ name, headline }: { name: string; headl
           <Search className="size-5" strokeWidth={2.2} />
         </span>
       </div>
-      <p className="text-xs text-muted-foreground">Usually under a minute</p>
+      <p className="text-xs text-muted-foreground">Usually takes a couple of minutes</p>
     </div>
   )
 }

@@ -1,6 +1,6 @@
 import pytest
 
-from app import config, llm, profile
+from app import config, expert_profile, llm, profile
 from tests.fakes import FakeAdkModel
 
 ENV_NAMES = ["MODEL_API_KEY", "MODEL_NAME", "COURTLISTENER_TOKEN", "COURTLISTENER_TOKEN_FALLBACK", "CONTACT_EMAIL", "DATABASE_PATH", "FIRECRAWL_API_KEY"]
@@ -21,6 +21,7 @@ def no_auto_profile(monkeypatch):
     """Every test: no automatic profile update after tool calls (one more AI call each); the
     profile tests turn it on."""
     monkeypatch.setattr(profile, "AUTO_UPDATE", False)
+    monkeypatch.setattr(expert_profile, "AUTO_BUILD", False)
 
 
 @pytest.fixture(autouse=True)

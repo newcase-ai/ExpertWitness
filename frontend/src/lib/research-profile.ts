@@ -1,4 +1,4 @@
-import type { Finding, Profile, ProfileItem, ResearchJob } from '@/lib/api'
+import type { Finding, Profile, ProfileItem, ResearchJob, SectionStatus } from '@/lib/api'
 import type { Entry, ExpertCase, ExpertProfile, Fact, Involvement } from '@/lib/types'
 
 // A research run's profile (backend Profile + findings + tool results) in the shape the product's
@@ -6,7 +6,7 @@ import type { Entry, ExpertCase, ExpertProfile, Fact, Involvement } from '@/lib/
 // ponytail: title and "Based in" are read from the AI's text; the backend spec
 // (docs/expert-profile-spec.md) asks for them as fields.
 
-const host = (url: string) => {
+export const host = (url: string) => {
   try {
     return new URL(url).hostname.replace(/^www\./, '')
   } catch {
@@ -32,7 +32,12 @@ export interface ResearchProfile extends ExpertProfile {
   credentials: Entry[]
   notHim: Entry[]
   authorStats: string | null
+  // From the structured profile: a section whose status is 'not_checked' says so instead of "Nothing found".
+  status?: Partial<Record<'career' | 'credentials' | 'cases' | 'publications' | 'online', SectionStatus>>
 }
+
+export const initialsOf = (name: string) =>
+  name.split(/\s+/).filter((w) => /^[A-Z][a-z]/.test(w)).map((w) => w[0]).slice(0, 2).join('')
 
 export function toResearchProfile(
   name: string,
@@ -109,7 +114,7 @@ export function toResearchProfile(
 
   return {
     name,
-    initials: name.split(/\s+/).filter((w) => /^[A-Z][a-z]/.test(w)).map((w) => w[0]).slice(0, 2).join(''),
+    initials: initialsOf(name),
     title: post ?? '',
     contact: basedIn ? [{ label: 'Based in', value: basedIn }] : [],
     tags: [],

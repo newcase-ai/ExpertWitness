@@ -2,8 +2,8 @@ import { useState, type ReactNode } from 'react'
 import { CARD, Disclaimer, Pending, Sources, SubHeading } from '@/components/profile/common'
 import { FactGrid } from '@/components/profile/FactGrid'
 import { CaseList, LitigationTimeline } from '@/components/profile/Litigation'
-import { EntryList, QualificationHighlights } from '@/components/profile/lists'
-import { ThingsToKnow } from '@/components/profile/ThingsToKnow'
+import { Career, EntryList, Facts, QualificationHighlights } from '@/components/profile/lists'
+import type { SectionStatus } from '@/lib/api'
 import type { ResearchProfile as Profile } from '@/lib/research-profile'
 import { LoaderCircle } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -18,9 +18,16 @@ const TABS = [
 ] as const
 type Tab = (typeof TABS)[number][0]
 
-// A section with no data yet: a skeleton while the run is going, else "Nothing found."
-const Empty = ({ running }: { running: boolean }) =>
-  running ? <Pending /> : <p className="text-sm text-muted-foreground">Nothing found.</p>
+// A section with no data yet: a skeleton while the run is going, else "Nothing found", or "Not
+// checked" when no research step covered it (structured profile only).
+const Empty = ({ running, status }: { running: boolean; status?: SectionStatus }) =>
+  running ? (
+    <Pending />
+  ) : (
+    <p className="text-sm text-muted-foreground">
+      {status === 'not_checked' ? 'Not checked in this research.' : 'Nothing found.'}
+    </p>
+  )
 
 // A research run's profile in the product's design (components/profile), from real backend data.
 export function ResearchProfile({
@@ -58,6 +65,15 @@ export function ResearchProfile({
             <p className="text-sm text-muted-foreground">
               {[p.title, p.contact.find((c) => c.label === 'Based in')?.value].filter(Boolean).join(' · ')}
             </p>
+            {p.tags.length > 0 && (
+              <ul className="mt-2 flex flex-wrap gap-1.5">
+                {p.tags.map((t) => (
+                  <li key={t} className="rounded-full bg-primary/10 px-2.5 py-0.5 text-[12px] font-medium text-primary">
+                    {t}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
           {actions}
         </div>
@@ -101,7 +117,21 @@ export function ResearchProfile({
                 ))}
               </div>
             </section>
-            <ThingsToKnow p={p} />
+            <section className={cn(CARD, '@3xl:row-span-2')}>
+              <h2 className="mb-3 font-serif text-lg font-semibold">Contact</h2>
+              {p.contact.length ? (
+                <dl className="space-y-3">
+                  {p.contact.map((c) => (
+                    <div key={c.label}>
+                      <dt className="text-xs text-muted-foreground">{c.label}</dt>
+                      <dd className="break-words text-sm">{c.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <Empty running={running} />
+              )}
+            </section>
             <section className={cn(CARD, '@3xl:col-span-2')}>
               <h2 className="mb-3 font-serif text-lg font-semibold">Key facts</h2>
               {p.highlights.length ? <QualificationHighlights facts={p.highlights} /> : <Empty running={running} />}
@@ -131,8 +161,16 @@ export function ResearchProfile({
               <SubHeading note="Court cases that name the expert. Which side hired the expert is not stated in these records.">
                 Cases &amp; testimony
               </SubHeading>
-              {p.cases.length ? <CaseList cases={p.cases} /> : <Empty running={running} />}
+              {p.cases.length ? <CaseList cases={p.cases} /> : <Empty running={running} status={p.status?.cases} />}
             </section>
+            {p.documents.length > 0 && (
+              <section className={CARD}>
+                <SubHeading note="Court filings that name the expert, by case. Open a case for its filings.">
+                  Court filings
+                </SubHeading>
+                <FactGrid facts={p.documents} />
+              </section>
+            )}
           </div>
         )}
 
@@ -144,23 +182,42 @@ export function ResearchProfile({
         )}
 
         {tab === 'publications' && (
-          <section className={CARD}>
-            <SubHeading note={p.authorStats ?? 'Papers and books that opposing counsel can quote back'}>Publications</SubHeading>
-            {p.publications.length ? <EntryList entries={p.publications} /> : <Empty running={running} />}
-          </section>
+          <div className="grid gap-4 @3xl:grid-cols-3">
+            <section className={cn(CARD, '@3xl:col-span-2')}>
+              <SubHeading note={p.authorStats ?? 'Papers and books that opposing counsel can quote back'}>Publications</SubHeading>
+              {p.publications.length ? <EntryList entries={p.publications} /> : <Empty running={running} status={p.status?.publications} />}
+            </section>
+            {p.status && (
+              <section className={CARD}>
+                <SubHeading note="Websites, CVs and directory listings the research read">Online presence</SubHeading>
+                {p.online.length ? <EntryList entries={p.online} /> : <Empty running={running} status={p.status.online} />}
+              </section>
+            )}
+          </div>
         )}
 
         {tab === 'career' && (
           <div className="grid gap-4 @3xl:grid-cols-2">
             <section className={CARD}>
-              <SubHeading>Roles &amp; affiliations</SubHeading>
-              {p.identity.length ? <EntryList entries={p.identity} /> : <Empty running={running} />}
+              <SubHeading>{p.career.length ? 'Career' : 'Roles & affiliations'}</SubHeading>
+              {p.career.length ? (
+                <Career roles={p.career} />
+              ) : p.identity.length ? (
+                <EntryList entries={p.identity} />
+              ) : (
+                <Empty running={running} status={p.status?.career} />
+              )}
             </section>
             <div className="space-y-4">
               <section className={CARD}>
                 <SubHeading>Education, licenses &amp; boards</SubHeading>
-                {p.credentials.length ? <EntryList entries={p.credentials} strong /> : <Empty running={running} />}
+                {p.credentials.length ? <EntryList entries={p.credentials} strong /> : <Empty running={running} status={p.status?.credentials} />}
               </section>
+              {p.professional.length > 0 && (
+                <section className={CARD}>
+                  <Facts facts={p.professional} />
+                </section>
+              )}
               {p.notHim.length > 0 && (
                 <section className={CARD}>
                   <SubHeading note="People with the same name who are not this expert">Ruled out</SubHeading>

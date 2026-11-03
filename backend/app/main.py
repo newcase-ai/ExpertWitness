@@ -3,13 +3,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query, Response
 
-from app import http, jobs, store
+from app import expert_profile, http, jobs, llm, memory, store
 from app.config import get_settings
 from app.models import (
     CandidateSearch,
     CandidateSearchRequest,
     CandidateSearchStarted,
     Dossier,
+    ExpertProfileView,
+    FileRow,
     Job,
     Profile,
     ResearchFindings,
@@ -133,3 +135,44 @@ def get_findings(dossier_id: str) -> ResearchFindings:
     if research.status in ("queued", "running"):  # a failed or killed run shows what it saved
         raise HTTPException(409, f"findings not ready: job {research.job_id} is {research.status}")
     return research
+
+
+def finished_research(dossier_id: str):
+    research = store.get_research(dossier_id)
+    if research is None:
+        raise HTTPException(404, "dossier not found")
+    if research.status in ("queued", "running"):
+        raise HTTPException(409, f"profile not ready: job {research.job_id} is {research.status}")
+    return research
+
+
+@app.get("/dossiers/{dossier_id}/expert-profile")
+def get_expert_profile(dossier_id: str) -> ExpertProfileView:
+    """The structured profile for the profile page (app/expert_profile.py). 409 while the run works;
+    `built` is false when its final model call failed or never ran (code-built parts only)."""
+    finished_research(dossier_id)
+    return expert_profile.view(dossier_id)
+
+
+@app.post("/dossiers/{dossier_id}/expert-profile/rebuild")
+async def rebuild_expert_profile(dossier_id: str) -> ExpertProfileView:
+    """Run the final model call again for a finished run (older runs, prompt changes)."""
+    research = finished_research(dossier_id)
+    if not get_settings().model_api_key:
+        raise HTTPException(503, "MODEL_API_KEY is not set")
+    candidate = store.get_candidate(research.candidate_id)
+    if candidate is None:
+        raise HTTPException(404, "candidate not found")
+    try:
+        await expert_profile.build(dossier_id, candidate)
+    except llm.ModelError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return expert_profile.view(dossier_id)
+
+
+@app.get("/dossiers/{dossier_id}/files")
+def get_files(dossier_id: str) -> list[FileRow]:
+    """The run's downloaded files and our notes on them (debug mode); no bytes or text."""
+    if store.get_research(dossier_id) is None:
+        raise HTTPException(404, "dossier not found")
+    return [FileRow(**r, has_text=bool(r["text_path"])) for r in memory.files(dossier_id)]

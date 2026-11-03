@@ -5,14 +5,18 @@ import AppHeader from '@/components/AppHeader'
 import RunResults, { ProfileView } from '@/components/run/RunResults'
 import { ResearchProfile } from '@/components/run/ResearchProfile'
 import { toResearchProfile } from '@/lib/research-profile'
+import { fromExpertProfile } from '@/lib/expert-profile-view'
 import Timeline from '@/components/run/Timeline'
 import { clock, duration, liveFindings, runStats } from '@/lib/trace'
 import {
   getDossier,
   getEvents,
+  getExpertProfile,
   getFindings,
   getJob,
   getProfile,
+  rebuildExpertProfile,
+  type ExpertProfileView,
   type Profile,
   type ResearchFindings,
   type ResearchJob,
@@ -42,6 +46,8 @@ export default function ExpertResearchLivePage() {
   const [events, setEvents] = useState<TraceEvent[]>([])
   const [result, setResult] = useState<ResearchFindings | null>(null)
   const [profile, setProfile] = useState<Profile | null>(null)
+  const [structured, setStructured] = useState<ExpertProfileView | null>(null)
+  const [rebuilding, setRebuilding] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [tab, setTab] = useState<Tab>('Timeline')
   const [now, setNow] = useState(Date.now())
@@ -98,6 +104,9 @@ export default function ExpertResearchLivePage() {
         const saved = await getFindings(dossierId)
         if (!live) return
         setResult(saved)
+        getExpertProfile(dossierId)
+          .then((v) => live && setStructured(v))
+          .catch(() => {}) // the page keeps the live profile
         if (current.status === 'failed')
           setError(`Research stopped: ${current.error ?? 'failed'}. Showing what it found before that.`)
       } catch (e) {
@@ -124,10 +133,21 @@ export default function ExpertResearchLivePage() {
   const status = STATUS[job?.status ?? 'queued'] ?? STATUS.queued
   const toolCalls = Object.values(stats.tools).reduce((a, b) => a + b, 0)
 
+  // Once the run is done its structured profile (organized by the backend) replaces the live one.
   const view = useMemo(
-    () => profile && toResearchProfile(name, profile, findings, job?.activity ?? []),
-    [name, profile, findings, job]
+    () =>
+      structured?.built
+        ? fromExpertProfile(structured, name)
+        : profile && toResearchProfile(name, profile, findings, job?.activity ?? []),
+    [structured, name, profile, findings, job]
   )
+  const rebuild = () => {
+    setRebuilding(true)
+    rebuildExpertProfile(dossierId)
+      .then(setStructured)
+      .catch((e) => setError(e instanceof Error ? e.message : 'Could not rebuild the profile'))
+      .finally(() => setRebuilding(false))
+  }
   if (!debug)
     return (
       <div className="bg-dots min-h-screen">
@@ -158,7 +178,21 @@ export default function ExpertResearchLivePage() {
           <button type="button" onClick={() => navigate('/')} className="font-medium text-primary hover:underline">
             New search
           </button>
-          {debugToggle}
+          <div className="flex items-center gap-4">
+            {!running && (
+              <button
+                type="button"
+                onClick={rebuild}
+                disabled={rebuilding}
+                title="Run the step that organizes this run into the structured profile again"
+                className="flex items-center gap-1.5 rounded-md border bg-card px-3 py-1.5 font-medium hover:bg-muted disabled:opacity-50"
+              >
+                {rebuilding && <LoaderCircle className="size-3.5 animate-spin" />}
+                {structured?.built ? 'Rebuild profile' : 'Build profile'}
+              </button>
+            )}
+            {debugToggle}
+          </div>
         </div>
 
         <header className="flex flex-wrap items-center gap-x-3 gap-y-2">

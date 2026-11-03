@@ -141,6 +141,7 @@ export interface ResearchFindings {
 
 export interface Dossier {
   dossier_id: string
+  candidate_id: string
   job_id: string
   display_name: string
 }
@@ -204,3 +205,69 @@ export type Profile = Record<(typeof PROFILE_SECTIONS)[number], ProfileItem[]> &
 
 export const getProfile = (dossierId: string): Promise<Profile> =>
   getJson(`/api/dossiers/${dossierId}/profile`)
+
+// The structured profile, organized once research ends (backend app/expert_profile.py,
+// docs/expert-profile-spec.md). Every value cites `refs` (finding or file ids); `sources` maps them.
+export type SectionStatus = 'found' | 'none_found' | 'not_checked'
+type Refs = { refs: string[]; confidence?: 'high' | 'low' }
+export type Sourced = Refs & {
+  value: string
+  source_kind: 'records' | 'self_reported' | 'third_party' | null
+  note: string | null
+}
+export interface Section<T> {
+  status: SectionStatus
+  items: T[]
+}
+export interface RiskCheck {
+  status: 'clear' | 'flagged' | 'not_checked'
+  summary: string
+  items: Sourced[]
+  checked_sources: string[]
+}
+export interface ExpertProfileView {
+  dossier_id: string
+  status: JobStatus
+  updated_at: string | null
+  built: boolean // false: the final organizing step failed or never ran; only code-built lists
+  name: string
+  headline: Sourced | null
+  specialties: Sourced[]
+  expertise_tags: Sourced[]
+  summary: Sourced | null
+  contact: {
+    based_in: Sourced | null
+    business_address: Sourced | null
+    phone: Sourced | null
+    email: Sourced | null
+    website: Sourced | null
+    current_role: (Refs & { title: string; org: string }) | null
+  }
+  highlights: (Sourced & { label: string })[]
+  career: Section<Refs & { title: string; org: string; location: string | null; start_year: number | null; end_year: number | null; current: boolean }>
+  education: Section<Refs & { degree: string; field: string | null; institution: string; year: number | null }>
+  licenses: Section<Refs & { kind: string; state: string | null; number: string | null; status: 'active' | 'expired' | 'unknown'; since: number | null }>
+  board_certifications: Section<Refs & { board: string | null; specialty: string; since: number | null }>
+  affiliations: Section<Sourced>
+  memberships: Section<Sourced>
+  fees: Section<Refs & { service: string; amount: string }>
+  testimony_summary: Section<Sourced>
+  cases: Section<Refs & { name: string; court: string; docket_number: string | null; year: number | null; url: string; nature_of_suit: string | null; involvement: string | null; side: 'plaintiff' | 'defense' | 'unknown' }>
+  documents: Section<Refs & { title: string; case_name: string | null; date: string | null; url: string; page_count: number | null; file_id: string | null }>
+  risk: Record<'license_status' | 'board_discipline' | 'exclusion_lists' | 'retractions', RiskCheck>
+  red_flags: Section<Sourced>
+  not_him: Section<Sourced>
+  publications: Section<Refs & { title: string; venue: string | null; year: number | null; url: string; cited_by: number | null; retracted: boolean }> & {
+    stats: { works: number; citations: number; h_index: number | null; source: string } | null
+  }
+  online: Section<Refs & { title: string; url: string; kind: 'cv' | 'practice_site' | 'expert_directory' | 'physician_directory' | 'other' }>
+  sources: { ref: string; title: string; url: string; kind: string }[]
+}
+
+// 409 while the run works.
+export const getExpertProfile = (dossierId: string): Promise<ExpertProfileView> =>
+  getJson(`/api/dossiers/${dossierId}/expert-profile`)
+
+// Runs the organizing step again for a finished run (debug: older runs, prompt changes).
+export const rebuildExpertProfile = (dossierId: string): Promise<ExpertProfileView> =>
+  postJson(`/api/dossiers/${dossierId}/expert-profile/rebuild`, {})

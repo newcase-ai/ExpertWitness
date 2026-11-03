@@ -303,3 +303,232 @@ class ResearchFindings(BaseModel):
     status: JobStatus
     findings: list[Finding] = []
     gaps: list[Gap] = []
+
+
+# The structured expert profile for the profile page (app/expert_profile.py,
+# docs/expert-profile-spec.md). Every value cites `refs`: finding ids or file ids of the run.
+
+Confidence = Literal["high", "low"]
+SourceKind = Literal["records", "self_reported", "third_party"]
+SectionStatus = Literal["found", "none_found", "not_checked"]
+
+
+class Sourced(BaseModel):
+    value: str
+    refs: list[str]
+    confidence: Confidence = "low"
+    source_kind: SourceKind | None = None
+    note: str | None = None  # e.g. "listed as cell"
+
+
+class Highlight(Sourced):
+    label: str  # "Experience", "Board certification", "Depositions (4 yrs)", ...
+
+
+class CurrentRole(BaseModel):
+    title: str
+    org: str
+    refs: list[str]
+    confidence: Confidence = "low"
+
+
+class Role(BaseModel):
+    title: str
+    org: str
+    location: str | None = None
+    start_year: int | None = None
+    end_year: int | None = None
+    current: bool = False
+    refs: list[str]
+    confidence: Confidence = "low"
+
+
+class Education(BaseModel):
+    degree: str
+    field: str | None = None
+    institution: str
+    year: int | None = None
+    refs: list[str]
+    confidence: Confidence = "low"
+
+
+class License(BaseModel):
+    kind: str
+    state: str | None = None
+    number: str | None = None
+    status: Literal["active", "expired", "unknown"] = "unknown"
+    since: int | None = None
+    refs: list[str]
+    confidence: Confidence = "low"
+
+
+class BoardCert(BaseModel):
+    board: str | None = None
+    specialty: str
+    since: int | None = None
+    refs: list[str]
+    confidence: Confidence = "low"
+
+
+class Fee(BaseModel):
+    service: str
+    amount: str
+    refs: list[str]
+    source_kind: SourceKind = "self_reported"
+
+
+class Contact(BaseModel):
+    based_in: Sourced | None = None
+    business_address: Sourced | None = None
+    phone: Sourced | None = None
+    email: Sourced | None = None
+    website: Sourced | None = None  # the expert's own site, not a directory
+    current_role: CurrentRole | None = None
+
+
+class RiskNote(BaseModel):
+    """The model's reading of a risk check that has no tool of its own (license, board discipline)."""
+
+    status: Literal["clear", "flagged", "not_checked"] = "not_checked"
+    summary: str = ""
+    refs: list[str] = []
+
+
+class ProfileFacts(BaseModel):
+    """What the final model call organizes (saved per run after the code checks)."""
+
+    headline: Sourced | None = None
+    specialties: list[Sourced] = []
+    expertise_tags: list[Sourced] = []
+    summary: Sourced | None = None
+    contact: Contact = Contact()
+    highlights: list[Highlight] = []
+    career: list[Role] = []
+    education: list[Education] = []
+    licenses: list[License] = []
+    board_certifications: list[BoardCert] = []
+    affiliations: list[Sourced] = []
+    memberships: list[Sourced] = []
+    fees: list[Fee] = []
+    testimony_summary: list[Sourced] = []
+    license_status: RiskNote = RiskNote()
+    board_discipline: RiskNote = RiskNote()
+    red_flags: list[Sourced] = []
+    not_him: list[Sourced] = []
+
+
+class Section[T](BaseModel):
+    status: SectionStatus
+    items: list[T] = []
+
+
+class Case(BaseModel):
+    name: str
+    court: str
+    docket_number: str | None = None
+    year: int | None = None
+    url: str
+    nature_of_suit: str | None = None
+    involvement: str | None = None  # the court tool's role: "consultant or reviewer", "expert witness", ...
+    side: Literal["plaintiff", "defense", "unknown"] = "unknown"
+    refs: list[str]
+    confidence: Confidence
+
+
+class CaseDocument(BaseModel):
+    title: str
+    case_name: str | None = None
+    date: str | None = None
+    url: str
+    page_count: int | None = None
+    file_id: str | None = None
+    refs: list[str]
+
+
+class Publication(BaseModel):
+    title: str
+    venue: str | None = None
+    year: int | None = None
+    url: str
+    cited_by: int | None = None
+    retracted: bool = False
+    refs: list[str]
+
+
+class AuthorStats(BaseModel):
+    works: int
+    citations: int
+    h_index: int | None = None
+    source: str
+
+
+class OnlinePresence(BaseModel):
+    title: str
+    url: str
+    kind: Literal["cv", "practice_site", "expert_directory", "physician_directory", "other"] = "other"
+    refs: list[str]
+
+
+class RiskCheck(BaseModel):
+    status: Literal["clear", "flagged", "not_checked"]
+    summary: str
+    items: list[Sourced] = []
+    checked_sources: list[str] = []
+
+
+class Risk(BaseModel):
+    license_status: RiskCheck
+    board_discipline: RiskCheck
+    exclusion_lists: RiskCheck
+    retractions: RiskCheck
+
+
+class PublicationSection(Section[Publication]):
+    stats: AuthorStats | None = None
+
+
+class ProfileSource(BaseModel):
+    ref: str
+    title: str
+    url: str
+    kind: str  # finding kind, or "file"
+
+
+class ExpertProfileView(BaseModel):
+    dossier_id: str
+    status: JobStatus
+    updated_at: str | None = None
+    built: bool  # False when the final model call failed or never ran: model fields are empty
+    name: str
+    headline: Sourced | None = None
+    specialties: list[Sourced] = []
+    expertise_tags: list[Sourced] = []
+    summary: Sourced | None = None
+    contact: Contact
+    highlights: list[Highlight] = []
+    career: Section[Role]
+    education: Section[Education]
+    licenses: Section[License]
+    board_certifications: Section[BoardCert]
+    affiliations: Section[Sourced]
+    memberships: Section[Sourced]
+    fees: Section[Fee]
+    testimony_summary: Section[Sourced]
+    cases: Section[Case]
+    documents: Section[CaseDocument]
+    risk: Risk
+    red_flags: Section[Sourced]
+    not_him: Section[Sourced]
+    publications: PublicationSection
+    online: Section[OnlinePresence]
+    sources: list[ProfileSource] = []
+
+
+class FileRow(BaseModel):
+    file_id: str
+    source_url: str
+    mime: str
+    bytes: int
+    retrieved_at: str
+    note_md: str | None = None
+    has_text: bool

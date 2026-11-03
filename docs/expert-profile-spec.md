@@ -2,49 +2,124 @@
 
 **For:** backend
 **From:** frontend (expert profile redesign)
-**Date:** 2026-11-02
+**Date:** 2026-11-03 (replaces the 2026-11-02 draft)
 
 ## Goal
 
-The profile page shows an expert after research finishes. It has two modes:
+The profile page should show an expert as clear blocks: a header (headline, specialty, tags), business
+contact, career, education, licenses, cases, publications and risk checks. It should not show lists of
+sentences.
 
-- **Normal mode** is for the attorney looking at an expert. It shows facts about the expert, each with its sources.
-- **Debug mode** is for us. It shows the same page plus research internals: confidence, conflicts, open leads, gaps, the run log and tool notes.
+Research already collects most of this. The problem is the format. `GET /dossiers/{id}/profile` returns
+nine lists of free-text sentences, and the page can't lay those out without guessing.
 
-The target layout and content are the demo profiles in `ExpertsFrontEnd`, branch `demo-dri`, file `src/lib/expert-profile-mock.ts` (`ExpertProfile`). These are fictional mocks. We now want the backend to return the same kind of data, for real, from a research run.
+**The change:** once research ends, one more model call organizes what the run collected into a
+structured `ExpertProfileView`. The frontend reads it from a new endpoint. Research tools, findings and
+the live `/profile` stay as they are.
 
-Today `GET /dossiers/{id}/profile` returns the `Profile` in `app/models.py`. It is nine lists of free-text sentences (`text`, `refs`, `confidence`). The page can't build the header, contact block, career timeline, fee table or risk checks from free text without guessing. This spec asks for a structured view of the same research.
+## What a run has today
+
+Checked against the 8 runs in the local DB (2 experts):
+
+| Data | Where | Shape |
+|---|---|---|
+| Cases: name, court, docket number, date filed, nature of suit, match role | `court_docket` findings | JSON |
+| Court documents: case, document number, date, page count, `file_id` | `court_file` findings | JSON |
+| Papers (venue, year, DOI, citations, retracted); author stats (works, citations, h-index) | `work`, `author_stats` | JSON |
+| Field, location | candidate record | JSON |
+| Directory, CV and practice-site links | `site_hit` | URL and title only |
+| License numbers, boards, career facts, self-reported testimony counts | `web_credential`, `web_fact`, `web_testimony`, `file_fact` | free-text sentences |
+| Business address, phone, email, career roles with years, education, fees | **only the raw CV or site text** (`files.text_path`) | raw text |
+
+Example: Karol Silva's CV text starts with the business address "204 E. 2nd Ave, Suite 241, San Mateo",
+but the file note and the `ask_pdf` answer both dropped it. So the final step must read the CV and site
+text itself, not just the findings.
 
 ## What to build
 
-1. **New endpoint** `GET /dossiers/{dossier_id}/expert-profile` that returns `ExpertProfileView` (below).
-   - Keep `GET /dossiers/{id}/profile` as it is. Debug mode still uses it.
-   - Return `409` while the run is queued or running, like `/findings` does. A failed run returns what it has.
-2. **New endpoint** `GET /dossiers/{dossier_id}/files` for debug mode. It lists the downloaded files: `file_id`, `source_url`, `mime`, `bytes`, `retrieved_at`, `note_md`, and whether a text version exists. Nothing serves the `files` table today.
-3. **Fill the structured profile from the CV and site text as well as from findings.** Most of the header and contact data (address, phone, website, career, education, fees) is only in downloaded CVs and practice websites. The current profile step reads findings only, so this data never reaches it.
-   - Example from a real run: a CV's text had the business address and phone number, but neither appears in any finding or in the profile.
-   - Either save these lines as findings when a file is read, or let the profile step read the file notes or text. Backend's choice, as long as every value can cite where it came from (see rules).
+### 1. A final job step, `expert_profile`
+
+In `jobs.run_research`, after `main_agent` and before `finish_job`, run a new module, `app/expert_profile.py`.
+
+**Input to the model:**
+- The candidate (name, field, location).
+- Every finding of the run, one line each with its id. Leave out `work` and ruled-out `court_docket`:
+  code handles those lists (see "Built by code").
+- The text of each downloaded file that is **not** a court file (CVs, practice pages, directory pages),
+  headed with its `file_id`. Cap each file and the total (for example 30k and 60k characters). CVs put
+  contact and career details first, so cut from the end.
+
+**Output:** the "model" fields of `ExpertProfileView` (below), as JSON with a schema.
+
+**Code checks before saving** (same idea as `items_of` today):
+- Every value cites `refs`: finding ids or file ids of this run. A value without valid refs is dropped.
+- `phone`, `email`, `business_address` and `website` must appear in the text of a cited file or finding
+  (ignore case and whitespace). Otherwise drop them, so the model can't invent contact data.
+- Values outside the allowed enums are dropped.
+
+**Where it's saved:** a new `expert_profiles` table (`dossier_id`, `data`, `updated_at`), owned by `store.py`.
+
+**On failure:** a model error is a gap (`expert_profile` step), and the job still ends `done`. The page
+falls back to "not available".
+
+**Rebuild:** `POST /dossiers/{id}/expert-profile/rebuild` runs the step again for a finished run. This
+lets us fill in existing runs and try prompt changes without re-running research.
+
+### 2. Built by code (no model)
+
+These lists are copied straight from the findings when the endpoint is called:
+
+- `cases` come from `court_docket` findings that are not "ruled out": name, court, docket number, year
+  from `date_filed`, url, and `involvement` from `match.role`. A case the model puts under `not_him`
+  (and its filings) is left out.
+- `documents` come from `court_file` findings plus files in the `files` table.
+- `publications` come from `work`; `publication_stats` comes from `author_stats`.
+- `online` comes from `site_hit` and `web_*` URLs, without duplicates.
+- `sources` covers every finding and file cited anywhere in the view.
+- `status` for each section (see below).
+
+### 3. Endpoints
+
+- `GET /dossiers/{id}/expert-profile` returns `ExpertProfileView`. It returns `409` while the run is queued
+  or running, like `/findings`. A finished run without a saved model part still returns the code-built
+  part, with the model fields set to `null` or `[]`.
+- `POST /dossiers/{id}/expert-profile/rebuild` (see above).
+- `GET /dossiers/{id}/files` (debug mode) returns `file_id`, `source_url`, `mime`, `bytes`, `retrieved_at`,
+  `note_md` and `has_text`.
 
 ## Rules for every field
 
-- **Every value cites its sources.** `refs` holds finding ids from this run; for a value taken from a file, a `file_id` is fine. The page shows the sources behind each value, so a value without refs is dropped (same rule as `items_of` today).
-- **Unknown means `null` or `[]`. Never guess.** Don't fill a field from general knowledge or from "similar experts".
-- **"None found" and "not checked" are different.** The page shows "None found" only when the research actually looked. Every section and every risk check carries a `status`:
-  - `found`: there are entries.
-  - `none_found`: we checked a real source and found nothing.
-  - `not_checked`: no tool covered this, or the tool failed.
-- **Side is never inferred.** Use `plaintiff` or `defense` only when a filing, opinion or transcript says who retained the expert. A reviewer hired by an insurer is not automatically `defense`. Otherwise use `unknown`.
-- **Self-reported numbers stay labelled.** "120+ cases, about 60% defense" from a CV or directory is `source_kind: "self_reported"`. Counts we computed from court records are `"records"`. The page shows them differently.
-- **Contact data is business contact only.** Include an address, phone or email only if the expert published it for professional contact (CV, practice website, expert directory). Never include a home address or personal social accounts. If the source labels a phone as a cell, keep the label in `note`.
-- **Confidence stays on every value** (`high` or `low`) for debug mode. Normal mode never shows it.
-- **Text is plain, short and factual.** Use the expert's name or "the expert", not "he" or "she", unless the source uses a pronoun.
+- **Every value cites refs.** No refs means the value is dropped.
+- **Unknown means `null` or `[]`.** Never fill a field from general knowledge.
+- **"None found" is not "not checked".** Code sets `status` from the run's activity log, never the model:
+  - `found`: the section has items.
+  - `none_found`: a tool that covers the section ran successfully and found nothing.
+  - `not_checked`: no covering tool ran, or it failed.
+
+  | Section | Covered by tools |
+  |---|---|
+  | cases, documents | `court_records`, `court_research`, `court_search` |
+  | publications | `publications` |
+  | exclusion_lists | `exclusion_check` |
+  | retractions | `retraction_check` |
+  | everything from the CV (career, education, contact, fees, ...) | a CV or site file was read (`note_file`, `ask_pdf`, `read_web_page`) |
+
+- **Side is never inferred.** `plaintiff` or `defense` only when a cited filing or opinion says who
+  retained the expert. An insurer's reviewer is not automatically `defense`. Otherwise `unknown`.
+- **Self-reported stays labelled.** "120+ cases, 60% defense" from a CV or directory is
+  `source_kind: "self_reported"`. Counts from court records are `"records"`.
+- **Business contact only.** Include an address, phone or email only if the expert published it for
+  professional contact (CV, practice site, directory). No home address and no personal social accounts.
+  If the source labels a phone as a cell, say so in `note`.
+- **Confidence on every value** (`high` or `low`), shown only in debug mode.
+- **Plain, short, factual text.** Use the name or "the expert", not "he" or "she".
 
 ## Response shape
 
-TypeScript notation. Field names are snake_case to match the rest of the API.
+TypeScript notation, snake_case. `[M]` means the final model call fills it. `[C]` means code fills it.
 
 ```ts
-type Ref = string                       // finding id (or file id for a value read from a file)
+type Ref = string                 // finding id or file id of this run
 type Confidence = 'high' | 'low'
 type SectionStatus = 'found' | 'none_found' | 'not_checked'
 type SourceKind = 'records' | 'self_reported' | 'third_party'
@@ -54,199 +129,111 @@ interface Sourced<T> {
   refs: Ref[]
   confidence: Confidence
   source_kind?: SourceKind
-  note?: string | null                  // e.g. "listed as cell"
+  note?: string | null            // e.g. "listed as cell"
 }
+interface Section<T> { status: SectionStatus; items: T[] }
 
 interface ExpertProfileView {
   dossier_id: string
-  status: 'queued' | 'running' | 'done' | 'failed'
+  status: 'done' | 'failed'
   updated_at: string
-  version: number
+  built: boolean                  // false when the model part is missing (model failed or never ran)
 
-  // Header
-  name: string                                  // display name
-  headline: Sourced<string> | null              // "Expert witness in accident reconstruction, vehicle dynamics and trucking collisions"
-  expertise_tags: Sourced<string>[]             // 3–8 short tags: "Accident reconstruction", "Event data recorders"
-  summary: Sourced<string> | null               // 3–5 sentence qualifications paragraph; every claim in it must be backed by refs
+  // Header [M]
+  name: string                                // [C] candidate.display_name
+  headline: Sourced<string> | null            // "Geriatrician and internist, former hospital chief medical officer"
+  specialties: Sourced<string>[]              // "Geriatric medicine", "Internal medicine"
+  expertise_tags: Sourced<string>[]           // 3–8 short tags
+  summary: Sourced<string> | null             // 3–5 sentences; every claim backed by refs
 
+  // Contact [M], business only, checked against the cited source text
   contact: {
-    based_in: Sourced<string> | null            // "Phoenix, Arizona"
+    based_in: Sourced<string> | null
     business_address: Sourced<string> | null
-    current_role: Sourced<{ title: string; org: string }> | null
     phone: Sourced<string> | null
     email: Sourced<string> | null
-    website: Sourced<string> | null             // the expert's own site, not a directory
+    website: Sourced<string> | null           // the expert's own site, not a directory
+    current_role: Sourced<{ title: string; org: string }> | null
   }
 
-  // Key numbers (the demo's "highlights"); a label/value list so we can add rows without a schema change
-  highlights: Array<Sourced<{ label: string; value: string }>>
-  // Expected labels when known: "Experience", "In practice", "Board certification", "Licensed",
-  // "Accreditation", "Cases reviewed", "Trial testimony", "Work split", "Has testified in"
+  // Key numbers [M]; labels such as "Experience", "Board certification", "Licensed",
+  // "Depositions (4 yrs)", "Work split", "Publications"
+  highlights: Array<Sourced<string> & { label: string }>
 
-  // Litigation
-  cases: { status: SectionStatus; items: Case[] }
-  expert_challenges: { status: SectionStatus; items: Challenge[] }   // Daubert / Frye / motions to exclude
-  documents: { status: SectionStatus; items: CaseDocument[] }
-  personal_litigation: { status: SectionStatus; items: PersonalCase[] }  // the expert as a party
+  // Background [M]
+  career: Section<Role>
+  education: Section<Education>
+  licenses: Section<License>
+  board_certifications: Section<BoardCert>
+  affiliations: Section<Sourced<string>>      // hospital and academic appointments
+  memberships: Section<Sourced<string>>
+  fees: Section<Fee>
+  testimony_summary: Section<Sourced<string>> // self-reported: "5 depositions in the past 4 years", "both sides"
 
-  // Risk checks (each one shown as a row: clear / flagged / not checked)
+  // Litigation [C]
+  cases: Section<Case>
+  documents: Section<CaseDocument>
+
+  // Risk [C status, M summary]
   risk: {
     license_status: RiskCheck
     board_discipline: RiskCheck
-    exclusion_lists: RiskCheck            // OIG LEIE and similar
-    criminal_records: RiskCheck
-    bankruptcies_liens_judgments: RiskCheck
+    exclusion_lists: RiskCheck
     retractions: RiskCheck
   }
+  red_flags: Section<Sourced<string>>         // [M] anything opposing counsel could use
+  not_him: Section<Sourced<string>>           // [M] same-name people ruled out
 
-  // Background
-  career: { status: SectionStatus; items: Role[] }
-  education: { status: SectionStatus; items: Education[] }
-  licenses: { status: SectionStatus; items: License[] }
-  board_certifications: { status: SectionStatus; items: BoardCert[] }
-  hospital_affiliations: { status: SectionStatus; items: Sourced<string>[] }
-  memberships: { status: SectionStatus; items: Sourced<string>[] }
-  fees: { status: SectionStatus; items: Fee[] }
-
-  // Footprint
-  publications: { status: SectionStatus; stats: AuthorStats | null; items: Publication[] }
-  news: { status: SectionStatus; items: NewsItem[] }
-  social: { status: SectionStatus; items: SocialProfile[] }    // professional accounts only
-  online: { status: SectionStatus; items: OnlinePresence[] }   // practice site, CV, directory listings
-
-  red_flags: { status: SectionStatus; items: Sourced<string>[] }  // anything opposing counsel could use
-  not_him: { status: SectionStatus; items: Sourced<string>[] }    // same-name people ruled out
-
-  sources: Array<{ name: string; url: string; kind: string }>     // distinct sources used, for the footer
+  // Footprint [C]
+  publications: Section<Publication> & { stats: AuthorStats | null }
+  online: Section<OnlinePresence>
+  sources: Array<{ ref: Ref; title: string; url: string; kind: string }>
 }
 
 interface Case {
-  name: string                          // "Nguyen v. Desert Sun Transport, LLC"
-  year: number | null
-  court: string                         // short form: "D. Ariz.", "Maricopa Cnty. Super. Ct."
-  docket_number: string | null
-  url: string | null
-  description: string | null            // one line: what the case was about
-  side: 'plaintiff' | 'defense' | 'court' | 'unknown'
-  involvement: 'deposition' | 'trial_testimony' | 'expert_report' | 'consultant_reviewer' | 'mentioned'
-  outcome_for_expert: 'admitted' | 'limited' | 'excluded' | null   // only if a ruling says so
-  refs: Ref[]
-  confidence: Confidence
+  name: string; court: string; docket_number: string | null; year: number | null; url: string
+  nature_of_suit: string | null
+  involvement: string | null      // match.role as the court tool saved it: "consultant or reviewer", ...
+  side: 'plaintiff' | 'defense' | 'unknown'
+  refs: Ref[]; confidence: Confidence
 }
-
-interface Challenge {
-  case_name: string
-  year: number | null
-  kind: 'daubert' | 'frye' | 'motion_to_exclude' | 'other'
-  ruling: 'admitted' | 'limited' | 'excluded' | 'pending' | 'unknown'
-  summary: string
-  refs: Ref[]
-  confidence: Confidence
-}
-
 interface CaseDocument {
-  kind: 'deposition_transcript' | 'trial_transcript' | 'expert_report' | 'exhibit' | 'affidavit' | 'cv' | 'fee_schedule' | 'other'
-  title: string
-  case_name: string | null
-  year: number | null
-  url: string | null
-  file_id: string | null                // when we downloaded it
-  refs: Ref[]
+  title: string; case_name: string | null; date: string | null; url: string
+  page_count: number | null; file_id: string | null; refs: Ref[]
 }
-
-interface PersonalCase {
-  name: string
-  year: number | null
-  court: string
-  expert_role: 'plaintiff' | 'defendant' | 'other'
-  summary: string
-  disposition: string | null            // "Dismissed by agreement, 2017"
-  refs: Ref[]
-  confidence: Confidence
-}
-
 interface RiskCheck {
   status: 'clear' | 'flagged' | 'not_checked'
-  summary: string                       // "Arizona license 00000 active, in good standing" / "No match in OIG LEIE"
-  items: Sourced<string>[]              // the details behind a flag
-  checked_sources: string[]             // what was searched, e.g. ["OIG LEIE", "Arizona Medical Board"]
+  summary: string                 // "No match in OIG LEIE" / "Arizona license 13780 listed as expired (WebMD)"
+  items: Sourced<string>[]
+  checked_sources: string[]
 }
-
-interface Role { title: string; org: string; start_year: number | null; end_year: number | null; current: boolean; refs: Ref[]; confidence: Confidence }
+interface Role { title: string; org: string; location: string | null; start_year: number | null; end_year: number | null; current: boolean; refs: Ref[]; confidence: Confidence }
 interface Education { degree: string; field: string | null; institution: string; year: number | null; refs: Ref[]; confidence: Confidence }
-interface License { kind: string; state: string; number: string | null; status: 'active' | 'expired' | 'unknown'; since: number | null; expires: string | null; refs: Ref[]; confidence: Confidence }
-interface BoardCert { board: string; specialty: string; since: number | null; refs: Ref[]; confidence: Confidence }
-interface Fee { service: string; amount: string; refs: Ref[]; source_kind: SourceKind }   // "$650/hr record review"
+interface License { kind: string; state: string | null; number: string | null; status: 'active' | 'expired' | 'unknown'; since: number | null; refs: Ref[]; confidence: Confidence }
+interface BoardCert { board: string | null; specialty: string; since: number | null; refs: Ref[]; confidence: Confidence }
+interface Fee { service: string; amount: string; refs: Ref[]; source_kind: SourceKind }
 interface AuthorStats { works: number; citations: number; h_index: number | null; source: string }
-interface Publication { title: string; venue: string | null; year: number | null; kind: 'article' | 'book' | 'chapter' | 'lecture' | 'abstract' | 'other'; url: string | null; cited_by: number | null; retracted: boolean; refs: Ref[] }
-interface NewsItem { title: string; outlet: string | null; date: string | null; url: string; refs: Ref[] }
-interface SocialProfile { platform: string; url: string; activity: 'active' | 'inactive' | 'unknown'; note: string | null; refs: Ref[] }
-interface OnlinePresence { title: string; kind: 'practice_site' | 'cv' | 'expert_directory' | 'physician_directory' | 'other'; url: string; refs: Ref[] }
+interface Publication { title: string; venue: string | null; year: number | null; url: string; cited_by: number | null; retracted: boolean; refs: Ref[] }
+interface OnlinePresence { title: string; url: string; kind: 'cv' | 'practice_site' | 'expert_directory' | 'physician_directory' | 'other'; refs: Ref[] }
 ```
 
-## Debug data (stays in the existing endpoints)
+## Left out on purpose
 
-Debug mode shows everything above plus the following. None of it goes into `ExpertProfileView`.
-
-| Debug item | Endpoint | Change needed |
-|---|---|---|
-| Confidence per value | `ExpertProfileView` (`confidence` fields) | none |
-| Findings, tool notes, match scores | `GET /dossiers/{id}/findings` | none |
-| Gaps | `GET /dossiers/{id}/findings` (`gaps`) | none |
-| Open leads | `GET /dossiers/{id}/profile` (`open_leads`) | none |
-| Run log | `GET /jobs/{job_id}` (`activity`), full trace in `/jobs/{job_id}/events` | none |
-| Downloaded files and notes | `GET /dossiers/{id}/files` | **new** (see above) |
-| Conflicts | `GET /dossiers/{id}/profile` (`conflicts`) | **add fields** (below) |
-
-### Conflicts: make them readable
-
-Today a conflict is one summary sentence plus refs, and nobody could tell which source said what. Add these fields to conflict items in `Profile.conflicts`:
-
-```ts
-interface ConflictItem {
-  text: string                          // as today
-  refs: Ref[]
-  confidence: Confidence
-  question: string                      // "Is the Arizona medical license active or expired?"
-  claims: Array<{
-    ref: Ref                            // must be in refs
-    stance: string                      // short answer this source gives: "Active", "Expired"
-    says: string                        // the source's own sentence, copied from the finding's facts
-  }>
-  next: string                          // how to settle it: "Look up license 00000 on the Arizona Medical Board site."
-}
-```
-
-The code should check that `claims[].ref` is in `refs` and that `says` appears in that finding's facts, the same way `refs` are checked today.
-
-## Mapping from the demo mock
-
-| Demo field (`expert-profile-mock.ts`) | Field here | Where the data is today |
-|---|---|---|
-| `name`, `initials` | `name` (frontend makes the initials) | `candidate.display_name` |
-| `title` | `headline` | Missing. `candidate.field` is close |
-| `contact[]` Based in | `contact.based_in` | `candidate.location` |
-| `contact[]` Business address, Phone, Website | `contact.*` | Only in CV and site text, never extracted |
-| `contact[]` Currently | `contact.current_role` | Buried in `profile.identity` sentences |
-| `tags` | `expertise_tags` | Missing. `profile.expertise` has long sentences |
-| `qualifications` | `summary` | Missing |
-| `highlights` | `highlights` | Partly in `profile.credentials` and `identity` sentences, and in web testimony facts |
-| `cases` (side, involvement) | `cases` | `profile.cases` sentences plus `court_docket` facts. Side is always "not stated" today |
-| `daubertChallenges` | `expert_challenges` | Missing (would come from opinions) |
-| `documents` | `documents` | Partly: `files` table, docket document lists |
-| `documents` "Personal litigation" | `personal_litigation` | Missing |
-| `risk` | `risk.*` | Partly: `exclusion_check` tool, `retraction_check` tool, license findings |
-| `publications` | `publications` | `work` and `author_stats` findings |
-| `news`, `social`, `online` | `news`, `social`, `online` | `online` partly from `site_hit` findings. `news` and `social` missing |
-| `career`, `education` | `career`, `education` | Only in CV text. Partly in `profile.identity` and `credentials` |
-| `professional` (licenses, affiliations, memberships, fees) | `licenses`, `board_certifications`, `hospital_affiliations`, `memberships`, `fees` | Licenses and boards in `profile.credentials` sentences. The rest only in CV text |
-| `sources` | `sources` | `profile.sources` (finding id to url and title) |
+- **News, social accounts, personal litigation, criminal records, bankruptcies and liens:** no tool
+  collects them. Add a section when a tool exists.
+- **Daubert and Frye challenges, and the expert's outcome in a case:** the court tools don't read rulings
+  for this yet. Add them with that tool.
+- **Readable conflicts** (`question`, `claims`, `next` on `/profile` conflicts): debug only. This is
+  separate work.
+- **Debug data** (findings, gaps, open leads, run log, tool notes) stays in the existing endpoints.
 
 ## Done when
 
-- A run on an expert with a public CV returns the header (headline, contact, current role, tags, summary), career and education, all filled and each value citing refs.
-- Every section and risk check has a `status`, and nothing shows `none_found` for a source that was never searched.
-- No `side` value is set without a filing or opinion that says it.
-- Conflicts in `/profile` carry `question`, `claims` and `next`.
-- `GET /dossiers/{id}/files` exists.
-- Tests use synthetic experts only (CLAUDE.md gotcha 8) and fake model responses (gotcha 9).
+- A finished run on an expert with a public CV returns headline, specialties, contact (with business
+  address and phone when the CV has them), current role, career and education. Each value cites refs.
+- No contact value is returned unless it appears in the cited source text.
+- Every section and risk check has a `status`, and `none_found` appears only where a covering tool ran.
+- No `side` other than `unknown` is returned without a filing that says it.
+- `rebuild` fills in an existing run. `/files` exists.
+- Tests use synthetic experts and fake model replies (gotchas 8, 9): one CV-backed run, one run where the
+  model fails (job still `done`, `built: false`), and one invented phone number that gets dropped.

@@ -82,6 +82,9 @@ create table if not exists files (
 create table if not exists profiles (
     dossier_id text primary key, data text not null, version integer not null, updated_at text not null
 );
+create table if not exists expert_profiles (
+    dossier_id text primary key, data text not null, updated_at text not null
+);
 """
 
 
@@ -398,6 +401,17 @@ def save_profile(profile: Profile) -> None:
     data = profile.model_dump(exclude={"dossier_id", "version", "updated_at", "sources"})
     execute("insert or replace into profiles (dossier_id, data, version, updated_at) values (?, ?, ?, ?)",
             (profile.dossier_id, json.dumps(data), profile.version, profile.updated_at))
+
+
+def get_profile_facts(dossier_id: str) -> tuple[dict, str] | None:
+    """The run's structured profile facts (app/expert_profile.py) and when they were built."""
+    rows = execute("select data, updated_at from expert_profiles where dossier_id = ?", (dossier_id,))
+    return (json.loads(rows[0]["data"]), rows[0]["updated_at"]) if rows else None
+
+
+def save_profile_facts(dossier_id: str, data: dict) -> None:
+    execute("insert or replace into expert_profiles (dossier_id, data, updated_at) values (?, ?, ?)",
+            (dossier_id, json.dumps(data), now()))
 
 
 def get_research(dossier_id: str) -> ResearchFindings | None:

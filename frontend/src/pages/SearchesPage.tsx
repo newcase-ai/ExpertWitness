@@ -1,8 +1,15 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { LoaderCircle } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { LoaderCircle, RotateCcw } from 'lucide-react'
 import AppHeader from '@/components/AppHeader'
-import { JobStatus, listSearches, SearchSummary } from '@/lib/api'
+import {
+  getDossier,
+  JobStatus,
+  listSearches,
+  SearchSummary,
+  startResearch,
+  startSearch,
+} from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 // Every research run, newest first and grouped by day: whether it is still running, what the agent is
@@ -11,6 +18,8 @@ import { cn } from '@/lib/utils'
 export default function SearchesPage() {
   const [searches, setSearches] = useState<SearchSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [retrying, setRetrying] = useState<string | null>(null) // the row being started again
+  const navigate = useNavigate()
 
   useEffect(() => {
     let live = true
@@ -42,6 +51,11 @@ export default function SearchesPage() {
         href: `/research/${r.dossier_id}`,
         now: r.last_activity,
         error: r.error,
+        // the same person again: the run's dossier names the candidate it researched
+        retry: () =>
+          getDossier(r.dossier_id)
+            .then((d) => startResearch(d.candidate_id))
+            .then((id) => `/research/${id}`),
       }))
     ),
     // a search nobody was picked from yet: still searching, waiting for a pick, or cancelled
@@ -56,6 +70,11 @@ export default function SearchesPage() {
         searching: searching(s),
         pick: s.status === 'done' ? s.candidates : undefined,
         error: s.status === 'failed' ? 'the search did not finish' : null,
+        // the list does not carry the specialty or city, so the new search is by name only
+        retry: () =>
+          startSearch({ name: s.name, specialty: '', location: '' }).then(
+            (id) => `/?name=${encodeURIComponent(s.name)}&search=${id}`
+          ),
       })),
   ].sort((a, b) => b.created_at.localeCompare(a.created_at))
   const days = groupByDay(rows)
@@ -130,6 +149,29 @@ export default function SearchesPage() {
                         </div>
                         <div className="ml-auto flex items-center gap-4">
                           <Status status={r.status} searching={r.searching} pick={r.pick !== undefined} />
+                          {r.status === 'failed' && (
+                            <button
+                              type="button"
+                              disabled={retrying !== null}
+                              onClick={() => {
+                                setRetrying(r.key)
+                                r.retry()
+                                  .then(navigate)
+                                  .catch((e) => {
+                                    setRetrying(null)
+                                    setError(e instanceof Error ? e.message : 'Could not start again')
+                                  })
+                              }}
+                              className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-primary/40 px-3 py-1 text-[13px] font-semibold text-primary hover:bg-primary/[0.07] disabled:opacity-50"
+                            >
+                              {retrying === r.key ? (
+                                <LoaderCircle className="size-3.5 animate-spin" />
+                              ) : (
+                                <RotateCcw className="size-3.5" />
+                              )}
+                              Try again
+                            </button>
+                          )}
                           <Link
                             to={r.href}
                             className="whitespace-nowrap font-semibold text-primary hover:underline"
@@ -201,6 +243,7 @@ type Row = {
   now?: string | null
   error?: string | null
   searching?: boolean
+  retry: () => Promise<string> // starts the run or search again; resolves to the page to open
   pick?: number // a finished search nobody was picked from: how many people it found
 }
 

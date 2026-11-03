@@ -2,7 +2,7 @@
 
 import asyncio
 
-from app import candidate_agent, llm, research_agent, store, trace
+from app import candidate_agent, expert_profile, llm, research_agent, store, trace
 from app.models import Candidate
 
 CANDIDATE_STEPS = [
@@ -83,6 +83,7 @@ async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testi
             store.set_step(job_id, "main_agent", "done", research_agent.stop_detail(run.stopped))
             trace.record("run_end", "main_agent", stopped=research_agent.stop_detail(run.stopped), job="done",
                          final_text=run.text, model_calls=run.calls, **trace.totals())
+        await build_expert_profile(dossier_id, candidate)
     except Exception as exc:  # noqa: BLE001 - any crash must mark the job failed
         trace.record("run_end", "main_agent", stopped="crash", job="failed", error=trace.error(exc), **trace.totals())
         store.finish_job(job_id, "failed", error=str(exc) or type(exc).__name__)
@@ -90,3 +91,16 @@ async def run_research(job_id: str, dossier_id: str, candidate: Candidate, testi
     finally:
         trace.stop(traced)
     store.finish_job(job_id, "done", result={"kind": "dossier", "id": dossier_id})
+
+
+async def build_expert_profile(dossier_id: str, candidate: Candidate) -> None:
+    """After the agent: organize the run into the structured profile (app/expert_profile.py). A failure
+    is a gap; the run still ends `done` and the page falls back to its code-built parts."""
+    if not expert_profile.AUTO_BUILD or not store.findings(dossier_id):
+        return
+    try:
+        await expert_profile.build(dossier_id, candidate)
+    except Exception as exc:  # noqa: BLE001 - the research is saved: never fail the run over its summary
+        reason = str(exc) if isinstance(exc, llm.ModelError) else "the structured profile could not be built"
+        store.add_gap(dossier_id, "expert_profile", reason)
+        trace.record("gap", step="expert_profile", reason=reason)
