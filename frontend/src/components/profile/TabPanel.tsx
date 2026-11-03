@@ -33,14 +33,16 @@ export function TabPanel({
           <section className={cn(CARD, 'space-y-4 @3xl:col-span-2')}>
             <h2 className="text-base font-semibold">Summary</h2>
             <p className="text-[15px] leading-7">{p.qualifications}</p>
-            <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
-              {litigationCounts(p).map((c) => (
-                <div key={c.label}>
-                  <div className="text-xl font-semibold">{c.n}</div>
-                  <div className="text-[13px] text-muted-foreground">{c.label}</div>
-                </div>
-              ))}
-            </div>
+            {litigationCounts(p).length > 0 && (
+              <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
+                {litigationCounts(p).map((c) => (
+                  <div key={c.label}>
+                    <div className="text-xl font-semibold">{c.n}</div>
+                    <div className="text-[13px] text-muted-foreground">{c.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
           <ThingsToKnow p={p} />
           <section className={cn(CARD, '@3xl:col-span-2')}>

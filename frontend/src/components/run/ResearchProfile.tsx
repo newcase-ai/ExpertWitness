@@ -43,12 +43,14 @@ export function ResearchProfile({
 }) {
   const [tab, setTab] = useState<Tab>('overview')
   const count = (i: string) => p.cases.filter((c) => c.involvement === i).length
-  const tiles = [
-    [p.cases.length, 'cases found'],
-    [count('Expert witness'), 'as expert witness'],
-    [count('Consultant or reviewer'), 'as consultant or reviewer'],
-    [p.publications.length, 'publications'],
-  ] as const
+  const tiles = (
+    [
+      [p.cases.length, 'cases found'],
+      [count('Expert witness'), 'as expert witness'],
+      [count('Consultant or reviewer'), 'as consultant or reviewer'],
+      [p.publications.length, 'publications'],
+    ] as [number, string][]
+  ).filter(([n]) => n > 0) // a count of 0 is not shown
 
   return (
     <div>
@@ -108,14 +110,16 @@ export function ResearchProfile({
             <section className={cn(CARD, 'space-y-4 @3xl:col-span-2')}>
               <h2 className="font-serif text-lg font-semibold">Summary</h2>
               {p.qualifications ? <p className="text-[15px] leading-7">{p.qualifications}</p> : <Empty running={running} />}
-              <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
-                {tiles.map(([n, label]) => (
-                  <div key={label}>
-                    <div className="font-serif text-2xl font-semibold">{n}</div>
-                    <div className="text-[13px] text-muted-foreground">{label}</div>
-                  </div>
-                ))}
-              </div>
+              {tiles.length > 0 && (
+                <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
+                  {tiles.map(([n, label]) => (
+                    <div key={label}>
+                      <div className="font-serif text-2xl font-semibold">{n}</div>
+                      <div className="text-[13px] text-muted-foreground">{label}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
             <section className={cn(CARD, '@3xl:row-span-2')}>
               <h2 className="mb-3 font-serif text-lg font-semibold">Contact</h2>

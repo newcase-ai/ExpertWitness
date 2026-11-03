@@ -27,9 +27,15 @@ const join = (parts: (string | number | false | null | undefined)[], sep = ' · 
 const selfReported = (x: { source_kind?: string | null }) => (x.source_kind === 'self_reported' ? ' (self-reported)' : '')
 const values = (xs: Sourced[]) => xs.map((x) => x.value + selfReported(x)).join('; ')
 
-function riskFact(label: string, r: RiskCheck): Fact {
+// A flagged item in a popup: its text, the sites it came from, and a link to the first one.
+function sourcedEntry(x: Sourced, urlOf: Map<string, string>, detail = ''): Entry {
+  const urls = x.refs.map((r) => urlOf.get(r)).filter((u): u is string => !!u)
+  return { title: x.value, detail: join([detail, [...new Set(urls.map(host))].join(', ')]), url: urls[0] }
+}
+
+function riskFact(label: string, r: RiskCheck, urlOf: Map<string, string>): Fact {
   if (r.status === 'flagged')
-    return { label, value: r.summary, flag: true, details: r.items.map((x) => ({ title: x.value, detail: x.note ?? '' })) }
+    return { label, value: r.summary, flag: true, details: r.items.map((x) => sourcedEntry(x, urlOf, x.note ?? '')) }
   if (r.status === 'clear')
     return { label, value: /^No(ne)? /.test(r.summary) ? r.summary : `None found: ${r.summary}`, details: [] }
   return { label, value: 'Not checked', details: [] }
@@ -64,12 +70,13 @@ export function fromExpertProfile(v: ExpertProfileView, fallbackName: string): R
     details,
   }))
 
-  const risk: Fact[] = Object.entries(RISK_LABEL).map(([k, label]) => riskFact(label, v.risk[k as keyof typeof RISK_LABEL]))
+  const urlOf = new Map(v.sources.map((s) => [s.ref, s.url]))
+  const risk: Fact[] = Object.entries(RISK_LABEL).map(([k, label]) => riskFact(label, v.risk[k as keyof typeof RISK_LABEL], urlOf))
   if (v.red_flags.status !== 'not_checked')
     risk.unshift(
       v.red_flags.items.length
         ? { label: 'Things opposing counsel could use', value: `${v.red_flags.items.length} found`, flag: true,
-            details: v.red_flags.items.map((x) => ({ title: x.value, detail: '' })) }
+            details: v.red_flags.items.map((x) => sourcedEntry(x, urlOf)) }
         : { label: 'Things opposing counsel could use', value: 'None found', details: [] }
     )
 
@@ -115,11 +122,12 @@ export function fromExpertProfile(v: ExpertProfileView, fallbackName: string): R
     risk,
     publications: v.publications.items.map((w) => ({
       title: w.retracted ? `${w.title} (retracted)` : w.title,
-      detail: join([w.year, w.venue, w.cited_by ? `cited ${w.cited_by}×` : '']),
+      detail: join([w.year, w.venue, w.cited_by ? `cited ${w.cited_by}×` : '', host(w.url)]),
+      url: w.url,
     })),
     news: [],
     social: [],
-    online: v.online.items.map((o) => ({ title: o.title, detail: join([ONLINE_KIND[o.kind], host(o.url)]) })),
+    online: v.online.items.map((o) => ({ title: o.title, detail: join([ONLINE_KIND[o.kind], host(o.url)]), url: o.url })),
     career: v.career.items.map((r) => ({
       title: r.title,
       org: join([r.org, r.location], ', '),

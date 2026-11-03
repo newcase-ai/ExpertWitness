@@ -35,6 +35,7 @@ export interface Fact {
 export interface Entry {
   title: string
   detail: string
+  url?: string // where it came from: the title links here
 }
 
 export interface Role {

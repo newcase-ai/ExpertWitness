@@ -15,7 +15,7 @@ export function litigationCounts(p: ExpertProfile) {
       n: String(p.daubertChallenges),
       label: plural(p.daubertChallenges, 'Daubert challenge', 'Daubert challenges'),
     },
-  ]
+  ].filter((c) => c.n !== '0') // a count of 0 is not shown
 }
 
 // ponytail: one dot per case on a year axis; two cases in the same year and side overlap.

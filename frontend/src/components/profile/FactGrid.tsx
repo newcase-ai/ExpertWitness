@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronRight, TriangleAlert } from 'lucide-react'
+import { ChevronRight, TriangleAlert } from 'lucide-react'
 import {
   Dialog,
   DialogContent,
@@ -63,7 +63,15 @@ export function FactGrid({ facts }: { facts: Fact[] }) {
                 <ul className="max-h-[60vh] divide-y overflow-y-auto">
                   {open.details.map((d) => (
                     <li key={d.title} className="py-3 first:pt-0 last:pb-0">
-                      <div className="text-sm font-medium">{d.title}</div>
+                      <div className="text-sm font-medium">
+                        {d.url ? (
+                          <a href={d.url} target="_blank" rel="noreferrer" className="hover:text-primary hover:underline">
+                            {d.title}
+                          </a>
+                        ) : (
+                          d.title
+                        )}
+                      </div>
                       <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">
                         {d.detail}
                       </p>
@@ -83,20 +91,16 @@ export function FactGrid({ facts }: { facts: Fact[] }) {
   )
 }
 
+// "None found" means our search came up empty, not a verified clean record: plain text, no check.
 function FactValue({ fact: f }: { fact: Fact }) {
-  const clear = f.value.startsWith('None') || f.value.startsWith('No ')
   return (
     <span
       className={cn(
         'flex shrink-0 items-center gap-1.5 text-[13px]',
-        f.flag
-          ? 'font-medium text-amber-600'
-          : clear
-            ? 'text-green-700 dark:text-green-500'
-            : 'text-muted-foreground'
+        f.flag ? 'font-medium text-amber-600' : 'text-muted-foreground'
       )}
     >
-      {f.flag ? <TriangleAlert className="size-3.5" /> : clear && <Check className="size-3.5" />}
+      {f.flag && <TriangleAlert className="size-3.5" />}
       {f.value}
     </span>
   )

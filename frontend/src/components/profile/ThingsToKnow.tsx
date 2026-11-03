@@ -21,8 +21,8 @@ export function ThingsToKnow({ p }: { p: ExpertProfile }) {
         </div>
       ))}
       {clear.length > 0 && (
-        <div className="space-y-1 rounded-lg bg-[#F2FAF6] p-3">
-          <div className="font-semibold text-[#1D5B40]">Clean record</div>
+        <div className="space-y-1 rounded-lg bg-muted p-3">
+          <div className="font-semibold">Nothing found</div>
           <div className="text-sm leading-normal">
             No {clear.map((f) => f.label.toLowerCase()).join(', ')} found.
           </div>

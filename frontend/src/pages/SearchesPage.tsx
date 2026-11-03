@@ -12,8 +12,8 @@ import {
 } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
-// Every research run, newest first and grouped by day: whether it is still running, what the agent is
-// doing now, and a link to the run. A search nobody was picked from yet is a row too (searching, not
+// Every research run, newest first and grouped by day: when it started, its status, and a link to the
+// run. A search nobody was picked from yet is a row too (searching, not
 // researched, or cancelled), linking back to its results. Reads only; refreshes every 5 s.
 export default function SearchesPage() {
   const [searches, setSearches] = useState<SearchSummary[] | null>(null)
@@ -49,7 +49,6 @@ export default function SearchesPage() {
         status: r.status,
         created_at: r.created_at,
         href: `/research/${r.dossier_id}`,
-        now: r.last_activity,
         error: r.error,
         // the same person again: the run's dossier names the candidate it researched
         retry: () =>
@@ -140,9 +139,6 @@ export default function SearchesPage() {
                             {r.pick !== undefined &&
                               ` · ${r.pick} ${r.pick === 1 ? 'person' : 'people'} found`}
                           </span>
-                          {r.status === 'running' && r.now && (
-                            <span className="text-[13px] text-[#1F4E8C]">Now: {r.now}</span>
-                          )}
                           {r.status === 'failed' && r.error && (
                             <span className="text-[13px] text-red-800">Cancelled: {r.error}</span>
                           )}
@@ -194,10 +190,11 @@ export default function SearchesPage() {
 
 const STATUS: Record<JobStatus, { label: string; style: string }> = {
   queued: { label: 'Waiting', style: 'bg-muted text-muted-foreground' },
-  running: { label: 'Researching', style: 'bg-[#E4EEFB] text-[#1F4E8C]' },
+  running: { label: 'Researching', style: 'bg-[#FDE7D8] text-[#A23F0C]' },
   done: { label: 'Ready', style: 'bg-[#E3F1EA] text-[#1D5B40]' },
   failed: { label: 'Cancelled', style: 'bg-red-50 text-red-800' },
 }
+const SEARCHING = { label: 'Searching', style: 'bg-[#EFE8FB] text-[#5B3A9E]' }
 
 function Status({
   status,
@@ -215,20 +212,21 @@ function Status({
         Not researched
       </span>
     )
+  const look = searching ? SEARCHING : STATUS[status]
   return (
     <span
       className={cn(
         'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[12px] font-semibold',
-        STATUS[status].style
+        look.style
       )}
     >
       <span
         className={cn(
           'size-1.5 rounded-full bg-current',
-          status === 'running' && 'animate-pulse motion-reduce:animate-none'
+          (searching || status === 'running') && 'animate-pulse motion-reduce:animate-none'
         )}
       />
-      {searching ? 'Searching' : STATUS[status].label}
+      {look.label}
     </span>
   )
 }
@@ -240,7 +238,6 @@ type Row = {
   status: JobStatus
   created_at: string
   href: string
-  now?: string | null
   error?: string | null
   searching?: boolean
   retry: () => Promise<string> // starts the run or search again; resolves to the page to open

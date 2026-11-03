@@ -83,7 +83,10 @@ export function toResearchProfile(
   const risk: Fact[] = [
     p.red_flags.length
       ? { label: 'Criticized or excluded testimony', value: `${p.red_flags.length} found`, flag: true,
-          details: p.red_flags.map((x) => ({ title: x.text, detail: '' })) }
+          details: p.red_flags.map((x) => {
+            const urls = x.refs.map((r) => p.sources[r]?.url ?? byId.get(r)?.url).filter((u): u is string => !!u)
+            return { title: x.text, detail: [...new Set(urls.map(host))].join(', '), url: urls[0] }
+          }) }
       : { label: 'Criticized or excluded testimony', value: 'None found', details: [] },
   ]
   const exclusion = toolDetail('exclusion_check')
@@ -127,6 +130,7 @@ export function toResearchProfile(
     publications: works.map(({ x, f }) => ({
       title: f.title,
       detail: [x.year, x.venue, x.cited_by_count ? `cited ${x.cited_by_count}×` : ''].filter(Boolean).join(' · '),
+      url: f.url,
     })),
     news: [],
     social: [],

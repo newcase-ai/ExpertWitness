@@ -66,7 +66,13 @@ export function EntryList({ entries, strong }: { entries: Entry[]; strong?: bool
           >
             <div className={cn('text-sm', strong ? 'font-semibold' : 'font-medium')}>
               <MarkNum mark={mark} />
-              {e.title}
+              {e.url ? (
+                <a href={e.url} target="_blank" rel="noreferrer" className="hover:text-primary hover:underline">
+                  {e.title}
+                </a>
+              ) : (
+                e.title
+              )}
             </div>
             <div className="text-[13px] text-muted-foreground">{e.detail}</div>
             <MarkNote mark={mark} />
