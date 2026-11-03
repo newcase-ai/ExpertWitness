@@ -80,6 +80,8 @@ class Run:
     filings: dict[int, dict] = field(default_factory=dict)
     # court_search paging: (words, case_name) -> {"queue": hits not shown yet, "next": link, "total": n}
     searches: dict[tuple[str, str], dict] = field(default_factory=dict)
+    # Payment approvals (evaluate_payment): "P1" -> {"amount_usd", "reason", "used"}; approved money is spent.
+    payments: dict[str, dict] = field(default_factory=dict)
 
     def left(self) -> float:
         """Seconds left in the budget (0 or less: stop)."""

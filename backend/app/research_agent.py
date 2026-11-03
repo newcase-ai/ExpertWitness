@@ -51,7 +51,12 @@ transcripts and news. For a state where the expert testified, worked or holds a 
 state's court, licence and discipline sites (sites_for_state), learn how to search each one you
 need (site_guide, with its `state`; wait for its reply before searching that site) and search them
 for other cases and records about the expert (firecrawl_search with `sites`). For another form of the name, an employer, a law firm, a lawyer or a party, search
-with it. Reply DONE when nothing new is likely."""
+with it.
+
+Some records cost money (a transcript, a court copy, a paywalled article). Before paying for one,
+check payment_budget, then ask evaluate_payment with the reason and the price. Only with its
+approval_id, and only if you have get_virtual_card, get a one-time card for that purchase. Never pay
+without an approval. Reply DONE when nothing new is likely."""
 
 
 def stop_detail(stopped: str | None) -> str:
@@ -73,7 +78,7 @@ def first_message(expert: Candidate, testimony_list: str | None) -> str:
     lines += [f"- {e.title} ({e.url})" for e in expert.evidence]
     if testimony_list:
         lines += ["", "Cases the user listed (pasted text, not checked):", testimony_list]
-    lines += ["", "Tools:"] + [f"- {name}: {t.label}" for name, t in REGISTRY.items() if t.main]
+    lines += ["", "Tools:"] + [f"- {name}: {t.label}" for name, t in REGISTRY.items() if t.main and t.enabled()]
     return "\n".join(lines)
 
 
@@ -84,7 +89,7 @@ async def research(job_id: str, dossier_id: str, expert: Candidate,
     run = Run(seconds=config.RESEARCH_SECONDS, caps=caps)
     ctx = Ctx(job_id=job_id, dossier_id=dossier_id, expert=expert, run=run)
     agent = llm.make_agent("main_agent", INSTRUCTIONS,
-                           tools=[ctx.adk_tool(name) for name, t in REGISTRY.items() if t.main])
+                           tools=[ctx.adk_tool(name) for name, t in REGISTRY.items() if t.main and t.enabled()])
     message = first_message(expert, testimony_list)
     # the pasted testimony list is never stored, except in a DEBUG_TRACE run
     shown = message if trace.full() or not testimony_list else first_message(

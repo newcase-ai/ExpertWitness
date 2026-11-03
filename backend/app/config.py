@@ -10,6 +10,7 @@ DEFAULT_DATABASE_PATH = str(DATA_DIR / "expert_witness.db")
 RESEARCH_SECONDS = 4 * 60 * 60  # the research job's time budget: 4 hours
 MAX_AGENT_CALLS = 1_000  # model calls of the main agent (ADK max_llm_calls)
 TOOL_CAP_SCALE = 10  # a research run may call each tool this many times its card's cap
+DEFAULT_PAYMENT_BUDGET_USD = 25.0  # what one research run may spend on paid records
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,8 @@ class Settings:
     firecrawl_api_key: str | None = None
     courtlistener_token_fallback: str | None = None  # used only when the main token is refused (401/403)
     debug_trace: bool = False  # DEBUG_TRACE=1: the run trace keeps everything in full (local testing only)
+    payment_budget_usd: float = DEFAULT_PAYMENT_BUDGET_USD
+    card_api_url: str | None = None  # one-time virtual card API; unset or "false": no card tool
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -61,4 +64,6 @@ def get_settings() -> Settings:
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
         courtlistener_token_fallback=value("COURTLISTENER_TOKEN_FALLBACK"),
         debug_trace=(value("DEBUG_TRACE") or "").lower() in ("1", "true", "yes"),
+        payment_budget_usd=float(value("PAYMENT_BUDGET_USD") or DEFAULT_PAYMENT_BUDGET_USD),
+        card_api_url=None if (value("CARD_API_URL") or "false").lower() == "false" else value("CARD_API_URL"),
     )

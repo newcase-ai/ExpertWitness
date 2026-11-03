@@ -1075,6 +1075,19 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 Core tools 9-12 are done when: each has a test with fake sources, keeps the guards it has today, and
 shows in the activity log of the live Stanton run (M8 8b, 8e).
 
+**Payment tools (hackathon, added 2026-11-03).** File `app/tools/payments.py`, card client
+`app/sources/card.py`. Approvals live in `Run.payments` (memory only); approved money counts as spent.
+- `payment_budget()`, label "Payment budget", cap 10: `{budget_usd, spent_usd, left_usd}`; budget from
+  `PAYMENT_BUDGET_USD` (default 25).
+- `evaluate_payment(reason: str, amount_usd: float)`, label "Evaluate a payment", cap 5: code refuses
+  an amount <= 0 or over what is left; then a helper agent (`ctx.sub_agent`, role `evaluator`, tool
+  `read_profile`) judges the reason (professional records only, gotchas 1-4) and replies APPROVE or
+  REFUSE first; anything else is a refusal. Approved: `{approved, approval_id "P<n>", amount_usd, why}`.
+- `get_virtual_card(approval_id: str)`, label "Get a one-time card", cap 5: one card per approval via
+  `card.issue`. Switched off (hidden from every agent, refused by the wrapper) when `CARD_API_URL` is
+  unset or `false` (`Tool.enabled`). Reply `{card_id, last4, exp, amount_usd}`: the full number and
+  CVC never go into a reply (model and trace see replies).
+
 ### 4B.10 File split (6g)
 **M7, Builder 1 (framework), first:** `app/tools/__init__.py` (registry, wrapper, `Ctx`),
 `app/main_agent.py`, `app/memory.py`, `app/store.py` (tables, `add_finding`, `add_gap`, activity),

@@ -57,21 +57,23 @@ class Tool:
     label: str
     cap: int
     main: bool = True  # False: only a helper agent (ctx.sub_agent) gets it, never the main agent
+    enabled: Callable[[], bool] = lambda: True  # False: switched off by settings, no agent gets it
 
 
 REGISTRY: dict[str, Tool] = {}
 
 
-def tool(label: str, cap: int, main: bool = True):
+def tool(label: str, cap: int, main: bool = True, enabled: Callable[[], bool] | None = None):
     """Register an async `fn(ctx, ...) -> dict` as a main agent tool (`main=False`: a helper agent's
-    tool). The function name is the tool name and must be unique across app/tools/ (gotcha 44)."""
+    tool; `enabled`: checked on every run, False hides and refuses it). The function name is the tool
+    name and must be unique across app/tools/ (gotcha 44)."""
 
     def register(fn):
         if fn.__name__ in REGISTRY:
             raise ValueError(f"duplicate tool name: {fn.__name__}")
         if "name" in inspect.signature(fn).parameters:
             raise ValueError("a tool argument must not be called `name` (gotcha 36)")
-        REGISTRY[fn.__name__] = Tool(fn, label, cap, main)
+        REGISTRY[fn.__name__] = Tool(fn, label, cap, main, *([enabled] if enabled else []))
         return fn
 
     return register
@@ -320,7 +322,7 @@ class Ctx:
         """Run a registered tool through the wrapper (DESIGN 4B.2 table): arguments, cap, clock, one
         activity row, never raises."""
         entry = REGISTRY.get(tool_name)
-        if entry is None:
+        if entry is None or not entry.enabled():
             return refuse(UNKNOWN_TOOL)
         self.run.caps.setdefault(tool_name, entry.cap)
         try:
