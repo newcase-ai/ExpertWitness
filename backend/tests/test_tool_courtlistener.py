@@ -330,13 +330,19 @@ def test_court_research_runs_the_helper_and_reports_what_it_saved(tool_ctx, worl
     reply = research(tool_ctx, adk_model, [
         call("court_search", case_name="Doe v. Example Co."), call("court_file", document_id=1102),
         call("court_verdict", docket_id=11, same_person=85, role="expert witness", why=WHY),
-        "SYNTHETIC report: Cases: Doe v. Example Co. 11. Leads: none."],
+        "SYNTHETIC done", "SYNTHETIC report: Cases: Doe v. Example Co. 11. Leads: none."],
         focus="Doe v. Example Co.", context="SYNTHETIC CV: plaintiff's expert in Doe v. Example Co.")
-    [helper] = adk_model.seen[:1]
+    helper, reporter = adk_model.seen[0], adk_model.seen[-1]
     assert set(helper.tools_dict) == set(court.HELPER_TOOLS)
     prompt = helper.contents[0].parts[0].text
     assert "Name: Alex Rivera" in prompt and "The lead researcher asks: Doe v. Example Co." in prompt
     assert "What they know that may help: SYNTHETIC CV: plaintiff's expert" in prompt
+    # the report is one more call with no tools, on the task and the helper's whole run
+    work = reporter.contents[0].parts[0].text
+    assert not reporter.tools_dict and len(adk_model.seen) == 5
+    assert "The lead researcher asks: Doe v. Example Co." in work and "(finished, 4 model calls)" in work
+    assert 'tool call court_verdict: {"docket_id": 11' in work and "tool result court_file:" in work
+    assert "model: SYNTHETIC done" in work
     [found] = tool_ctx.findings()
     file_id = found.facts["files"][0]["file_id"]
     assert reply == {
@@ -357,6 +363,17 @@ def test_court_research_lists_people_ruled_out(tool_ctx, research_sources, adk_m
         "SYNTHETIC report"])
     assert (reply["cases"], reply["ruled_out"]) == ([], ["Doe v. Example Co. 12"])
     assert "find every federal case naming the expert" in adk_model.seen[0].contents[0].parts[0].text
+
+
+def test_court_research_reports_after_the_step_limit(tool_ctx, research_sources, adk_model, monkeypatch):
+    """A helper that runs out of model calls still gets its report: the report call is not counted."""
+    monkeypatch.setattr(court, "HELPER_CALLS", 2)
+    research_sources()
+    reply = research(tool_ctx, adk_model, [
+        call("court_search"), call("court_verdict", docket_id=12, same_person=5, role="party", why="SYNTHETIC debtor"),
+        "SYNTHETIC report after the limit"])
+    assert reply["report"] == "SYNTHETIC report after the limit" and reply["ruled_out"] == ["Doe v. Example Co. 12"]
+    assert "(step_limit, 2 model calls)" in adk_model.seen[-1].contents[0].parts[0].text
 
 
 def test_court_research_stopped_early_keeps_what_was_saved(tool_ctx, world, adk_model):

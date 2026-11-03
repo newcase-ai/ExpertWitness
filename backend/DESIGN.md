@@ -717,7 +717,7 @@ One `Ctx` per research job, made by `app/main_agent.py`.
 | `ctx.save_file(url, data, mime, text=None) -> file_id` | Stores downloaded bytes in `data/files/<dossier_id>/<file_id>.<ext>` and, if given, a text version (`<file_id>.md`) for tools 4, 5, 8. Checks `fetch_ok(url)`, at most 20 MB per file, 30 files per job. Adds a `files` row. |
 | `ctx.file_text(file_id, max_chars=60_000) -> str` | The text version of a saved file ("" if none). Only for files of this dossier. |
 | `await ctx.ask_model(instructions, input, schema=None)` | One model call (`llm.call_model`). Every string in the answer that copies 40+ characters from `input` is dropped, and strings are cut to 500 chars (or the schema's `maxLength`). Use it for any model-written text that will be stored. |
-| `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6)` | A small ADK agent (`llm.make_agent` + `llm.run_agent`) for tools that are agents. `tools` are names of registered tools (also `@tool(..., main=False)` ones, which only helpers get); their calls go through the same wrapper, caps and activity log, but leave the automatic profile update to the calling tool's own call. Timeout = time left. Returns `AgentRun`. |
+| `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6, role="helper")` | A small ADK agent (`llm.make_agent` + `llm.run_agent`), named `<tool>_<role>`, for tools that are agents. `tools` are names of registered tools (also `@tool(..., main=False)` ones, which only helpers get); their calls go through the same wrapper, caps and activity log, but leave the automatic profile update to the calling tool's own call. Timeout = time left. Returns `AgentRun`. |
 | `await ctx.call_tool(tool_name, **args) -> dict` | Calls another registered tool through the wrapper (example: tool 8 calls `ask_pdf`). |
 | `ctx.log(text)` | Sets this call's activity `detail` (cut to 200 chars). Code-made text only: counts, reasons. Never page, snippet or model text. |
 
@@ -878,12 +878,16 @@ the automatic filing check are gone). Cases and filings shown to the helper are 
 - `court_research(focus: str = "", context: str = "")`: label "Court research", cap 3. `focus` (at
   most 500 characters): what to look for, empty = every federal case naming the expert; `context` (at
   most 3,000): what the main agent knows that is not in the profile yet (e.g. a CV's case list). Runs
-  the helper (`HELPER_INSTRUCTIONS`, at most 40 model calls) on `known_so_far` + focus + context.
+  the helper (`HELPER_INSTRUCTIONS`, at most 80 model calls, told to batch its tool calls) on
+  `known_so_far` + focus + context.
   Reply (code-made from what was saved, cut to `RESULT_MAX` by `fit_report`): `cases` (the helper's
   verdicts that are not ruled out: ref, case, court, docket number, date, level, role, why,
   file_ids), `ruled_out` (case names), `files` downloaded (file_id, title, case, name_on_pages),
-  `unjudged`, and `report`: the helper's final text (cases, ruled out, leads outside CourtListener,
-  what it searched). A helper model error is a gap; what it saved still counts. The helper's own tool
+  `unjudged`, and `report` (cases, ruled out, leads outside CourtListener, what it searched, cases
+  left): written by one more model call after the helper stops, however it stopped (step or time
+  limit too), from the task and the helper's whole run (`AgentRun.transcript`); this call is not
+  counted in the 80 (`write_report`, agent `court_research_reporter`). A helper model error is a
+  gap; what it saved still counts. The helper's own tool
   calls skip the automatic profile update; `court_research`'s call updates it once.
 - `court_search(words: str = "", case_name: str = "", more: bool = False)`: label "Court search", cap 5.
   One RECAP search (`courtlistener.search_dockets`, `type=r`): the expert's full-name phrases always

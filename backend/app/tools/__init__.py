@@ -295,9 +295,10 @@ class Ctx:
         return "" if answer is None else answer
 
     async def sub_agent(self, instructions: str, prompt: str, tools: list[str] = (),
-                        max_llm_calls: int = 6) -> llm.AgentRun:
-        """A small ADK agent whose `tools` (registered tool names) go through this same wrapper."""
-        agent = llm.make_agent(f"{self.tool or 'main'}_helper", instructions,
+                        max_llm_calls: int = 6, role: str = "helper") -> llm.AgentRun:
+        """A small ADK agent whose `tools` (registered tool names) go through this same wrapper.
+        `role` names it in the trace (`<tool>_<role>`)."""
+        agent = llm.make_agent(f"{self.tool or 'main'}_{role}", instructions,
                                tools=[self.adk_tool(t) for t in tools])
         return await llm.run_agent(agent, prompt, max_llm_calls=max_llm_calls, timeout=self.time_left())
 

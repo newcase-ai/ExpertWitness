@@ -275,7 +275,7 @@ def gap_unjudged(ctx: Ctx) -> None:
 
 # The court-records helper (a sub-agent run by court_research).
 HELPER_TOOLS = ["court_search", "court_filings", "court_file", "ask_pdf", "court_verdict"]
-HELPER_CALLS = 40  # model calls per court_research
+HELPER_CALLS = 80  # model calls per court_research; the report after it is one more
 FOCUS_MAX = 500
 CONTEXT_MAX = 3_000
 RULED_OUT_SHOWN = 20
@@ -284,6 +284,11 @@ CourtListener (federal court filings bought from PACER) for every federal case w
 appears, decide which cases are really theirs, learn what each says about them, and report back to
 the lead researcher. You get what the research knows about the expert and what the lead researcher
 asks for this time.
+
+Work in batches: your turns are limited, and one turn can hold many tool calls. Put every call you
+can make now into the same turn: all the verdicts you have decided, all the filings worth
+downloading, all the ask_pdf questions on files you have. One call per turn runs out of turns
+before every case is judged.
 
 How to work:
 1. Search. court_search already searches the expert's full name: never put the name in `words`.
@@ -310,16 +315,29 @@ thing saved. Before any new search, record a verdict for every case whose filing
 5. Follow clues. When a filing names another case the expert worked on, search it with case_name.
 Co-experts, law firms, parties and employers are leads for the report, not CourtListener searches.
 Stop when every case is judged. Professional records only: never private life, family, home
-address or health.
+address or health. When you stop, reply in one line; the report for the lead researcher is written
+from your work afterwards."""
 
-When you are done, reply with a short report for the lead researcher, in your own words (never copy
-the filings), in four parts:
-Cases: each case you judged to be the expert's: name, court, docket number, year, role and side,
-what they did, the ruling on their testimony, fees, and the file_ids worth reading further.
+REPORT_INSTRUCTIONS = """You write the report of a court-records search for the lead researcher of
+an expert witness. You get the task and everything the court-records helper did: its words, its tool
+calls and their results. Write in your own words, never copy the filings, in four parts:
+Cases: each case judged to be the expert's: name, court, docket number, year, role and side, what
+they did, the ruling on their testimony, fees, and the file_ids worth reading further.
 Ruled out: one line on the people with the same name.
 Leads: things worth searching outside CourtListener (state cases, other forms of the name, law
 firms, parties, companies, case numbers) and why.
-Searched: what you searched and what it found, so it is not repeated."""
+Searched: what was searched and what it found, so it is not repeated. If the helper stopped before
+judging every case, name the cases left and what is known about each."""
+
+
+async def write_report(ctx: Ctx, prompt: str, run) -> str:
+    """The report for the main agent: one model call after the helper stops, however it stopped
+    (not counted in HELPER_CALLS), written from the helper's whole run."""
+    # ponytail: the whole transcript goes in one call; cut it if a run outgrows the model's context
+    work = (f"The task:\n{prompt}\n\nThe helper's work ({run.stopped or 'finished'}, "
+            f"{run.calls} model calls):\n" + "\n".join(run.transcript))
+    out = await ctx.sub_agent(REPORT_INSTRUCTIONS, work, max_llm_calls=1, role="reporter")
+    return out.text.strip() or f"no report ({out.stopped or 'empty reply'})"
 
 
 def case_line(f) -> dict:
@@ -367,7 +385,7 @@ async def court_research(ctx: Ctx, focus: str = "", context: str = "") -> dict:
               f"What they know that may help: {context.strip() or 'nothing more'}")
     try:
         run = await ctx.sub_agent(HELPER_INSTRUCTIONS, prompt, tools=HELPER_TOOLS, max_llm_calls=HELPER_CALLS)
-        report = run.text.strip() or f"the helper stopped before its report ({run.stopped or 'no text'})"
+        report = await write_report(ctx, prompt, run)
     except llm.ModelError as e:  # what it saved before the failure still counts
         report = f"the helper stopped early ({e}); what it saved is listed"
         ctx.add_gap(f"court research stopped early ({e})")
