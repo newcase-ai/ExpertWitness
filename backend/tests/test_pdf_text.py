@@ -101,25 +101,6 @@ def test_split_text_form_feeds_or_chunks():
     assert pdf_text.split_text("x" * 7000) == ["x" * 3000, "x" * 3000, "x" * 1000]
 
 
-def test_batches_page_cap_and_page_numbers():
-    pages = [f"text {n}" for n in range(1, 301)]
-    out = pdf_text.batches(pages)
-    assert [(a, b) for a, b, _ in out] == [(1, 128), (129, 256), (257, 300)]
-    first = out[0][2]
-    assert first.startswith("[Page 1]\ntext 1\n[Page 2]\ntext 2\n") and first.endswith("[Page 128]\ntext 128")
-    assert out[2][2].startswith("[Page 257]\ntext 257")
-    assert pdf_text.batches([]) == []
-
-
-def test_batches_char_cap_and_long_page_cut():
-    pages = ["a" * 40, "b" * 40, "c" * 500, "d" * 10]
-    out = pdf_text.batches(pages, max_pages=128, max_chars=100)
-    assert [(a, b) for a, b, _ in out] == [(1, 2), (3, 3), (4, 4)]
-    assert all(len(t) <= 100 for _, _, t in out)
-    assert out[0][2] == "[Page 1]\n" + "a" * 40 + "\n[Page 2]\n" + "b" * 40
-    assert out[1][2] == ("[Page 3]\n" + "c" * 500)[:100]
-
-
 class FakeOcr:
     def __init__(self, fail_on=()):
         self.calls, self.fail_on = 0, fail_on

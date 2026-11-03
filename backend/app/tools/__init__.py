@@ -56,21 +56,22 @@ class Tool:
     fn: Callable[..., Awaitable[dict]]
     label: str
     cap: int
+    main: bool = True  # False: only a helper agent (ctx.sub_agent) gets it, never the main agent
 
 
 REGISTRY: dict[str, Tool] = {}
 
 
-def tool(label: str, cap: int):
-    """Register an async `fn(ctx, ...) -> dict` as a main agent tool. The function name is the tool
-    name and must be unique across app/tools/ (gotcha 44)."""
+def tool(label: str, cap: int, main: bool = True):
+    """Register an async `fn(ctx, ...) -> dict` as a main agent tool (`main=False`: a helper agent's
+    tool). The function name is the tool name and must be unique across app/tools/ (gotcha 44)."""
 
     def register(fn):
         if fn.__name__ in REGISTRY:
             raise ValueError(f"duplicate tool name: {fn.__name__}")
         if "name" in inspect.signature(fn).parameters:
             raise ValueError("a tool argument must not be called `name` (gotcha 36)")
-        REGISTRY[fn.__name__] = Tool(fn, label, cap)
+        REGISTRY[fn.__name__] = Tool(fn, label, cap, main)
         return fn
 
     return register
@@ -337,7 +338,9 @@ class Ctx:
         seq = store.start_activity(self.job_id, tool_name, entry.label, shown)
         trace.record("tool_start", seq=seq, tool=tool_name, label=entry.label, args=arguments)
         started, inside = time.monotonic(), trace.TOOL.set(seq)  # model calls inside link to this call
-        before = len(self.findings()) if profile.AUTO_UPDATE else None
+        # A helper agent's tool calls (self.tool set: inside a tool) leave the profile update to that
+        # tool's own call, once for everything it saved.
+        before = len(self.findings()) if profile.AUTO_UPDATE and not self.tool else None
         call = dataclasses.replace(self, tool=tool_name, detail=None)
         status, detail, reply, size, err = "done", None, None, None, None
         try:

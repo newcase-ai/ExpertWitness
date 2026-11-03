@@ -1,4 +1,4 @@
-"""Text of a downloaded PDF, page by page, for the court-file check (app/tools/court_files.py):
+"""Text of a downloaded PDF, page by page, for court filings (court_file in app/tools/courtlistener.py):
 pypdf text layer first; scanned files get CourtListener's OCR text or local OCR (RapidOCR on pages
 rendered by pypdfium2). No network: RapidOCR's models ship inside its wheel."""
 
@@ -10,8 +10,6 @@ from pathlib import Path
 from pypdf import PdfReader
 
 PAGE_CHARS = 20_000  # characters kept per page (bloated or broken PDFs can spew garbage)
-BATCH_PAGES = 128
-BATCH_CHARS = 120_000  # ponytail: a guess at the model's input limit; tune after real runs
 MIN_PAGE_CHARS = 20  # a page with fewer non-space characters counts as empty (a scan)
 CHUNK_CHARS = 3_000  # pseudo-page size for text without form feeds
 OCR_SCALE = 2.0  # render at 144 dpi: small print is still readable for OCR
@@ -115,22 +113,3 @@ def ocr_pages(path: str | Path, stop_at: float | None = None) -> tuple[list[str]
     finally:
         pdf.close()
 
-
-def batches(pages: list[str], max_pages: int = BATCH_PAGES, max_chars: int = BATCH_CHARS) -> list[tuple[int, int, str]]:
-    """(first page, last page, text with a "[Page N]" line before each page), 1-based, in order.
-    A batch holds at most `max_pages` pages and `max_chars` characters; a page longer than that on
-    its own is cut to `max_chars`."""
-    out, parts, first, size = [], [], 1, 0
-    for n, page in enumerate(pages, 1):
-        part = f"[Page {n}]\n{page}"[:max_chars]
-        if parts and (len(parts) == max_pages or size + 1 + len(part) > max_chars):
-            out.append((first, n - 1, "\n".join(parts)))
-            parts, size = [], 0
-        if not parts:
-            first, size = n, len(part)
-        else:
-            size += 1 + len(part)
-        parts.append(part)
-    if parts:
-        out.append((first, len(pages), "\n".join(parts)))
-    return out

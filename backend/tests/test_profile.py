@@ -97,7 +97,23 @@ def test_new_findings_shown_to_the_model_are_capped_papers_last(tool_ctx, adk_mo
     prompt = adk_model.seen[-1].contents[-1].parts[0].text
     lines = [line for line in prompt.splitlines() if line.startswith("[fnd_")]
     assert len(lines) == profile.NEW_MAX and lines[0].startswith(f"[{case}] court_opinion")
-    assert "SYNTHETIC court; 2020-01-01" in lines[0] and "(and 6 more findings, mostly publications)" in prompt
+    assert "SYNTHETIC court; 2020-01-01" in lines[0]
+    assert "(and 6 more findings, mostly publications or same-name court cases ruled out)" in prompt
+
+
+def test_court_cases_ruled_out_never_crowd_out_the_kept_ones(tool_ctx, adk_model):
+    """One court_research saves dozens of namesakes first and the expert's cases last: the kept ones
+    must still reach the model (a live run lost Barry v. DePuy behind 59 namesakes)."""
+    def verdict(n, level):
+        return tool_ctx.add_finding("court_docket", f"SYNTHETIC case {n}", f"https://example.org/d{n}",
+                                    facts={"match": {"level": level, "role": "party", "reasons": ["SYNTHETIC"]}})
+
+    ruled = [verdict(n, "ruled out") for n in range(45)]
+    kept = verdict(99, "medium")
+    adk_model.script = [reply()]
+    asyncio.run(profile.update(tool_ctx.dossier_id, tool_ctx.expert, tool_ctx.findings(), set(ruled) | {kept}))
+    lines = [line for line in adk_model.seen[-1].contents[-1].parts[0].text.splitlines() if line.startswith("[fnd_")]
+    assert lines[0].startswith(f"[{kept}] court_docket: SYNTHETIC case 99") and len(lines) == profile.NEW_MAX
 
 
 def test_a_court_finding_line_carries_the_role_and_the_reason(tool_ctx):

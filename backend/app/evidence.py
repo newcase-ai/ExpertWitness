@@ -74,7 +74,12 @@ class Run:
     used: dict[str, int] = field(default_factory=dict)
     failures: list[tuple[str, str]] = field(default_factory=list)  # (tool, exception type)
     count: int = 0
-    dockets: set[int] = field(default_factory=set)  # CourtListener dockets whose filings were checked
+    # CourtListener cases (docket_id -> case) and filings (document id -> filing, its docket_id and the
+    # file_id once downloaded) the court tools showed the agent: their ids are valid in later calls.
+    cases: dict[int, dict] = field(default_factory=dict)
+    filings: dict[int, dict] = field(default_factory=dict)
+    # court_search paging: (words, case_name) -> {"queue": hits not shown yet, "next": link, "total": n}
+    searches: dict[tuple[str, str], dict] = field(default_factory=dict)
 
     def left(self) -> float:
         """Seconds left in the budget (0 or less: stop)."""

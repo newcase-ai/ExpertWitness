@@ -50,8 +50,9 @@ a shared name is not proof. Every item cites the ids it rests on (refs); never a
 finding says. Sections: identity (other forms of the name, current role, employers, cities and
 states), expertise (field, specialties, typical case types), credentials (degrees, licences,
 boards and their status), cases (one item per case: name, court, year, side, his role, what
-happened), publications (a short summary and notable papers), red_flags (excluded or criticised
-testimony, retractions, discipline, exclusion lists), not_him, conflicts, open_leads (concrete
+happened), publications (a short summary and notable papers), red_flags (excluded, challenged or
+criticised testimony, retractions, discipline, exclusion lists, large payments from companies such as
+royalties or consulting fees: a possible bias), not_him, conflicts, open_leads (concrete
 things worth searching next). Short items in your own words, at most {ITEMS_MAX} per section.
 confidence: "high" only when a high-confidence finding or two findings agree, else "low".
 Professional facts only: no home address, family or health. changes: one short sentence on what
@@ -127,18 +128,25 @@ def items_of(rows: object, known: set[str]) -> list[ProfileItem]:
     return out[:ITEMS_MAX]
 
 
+def bulk(f: Finding) -> bool:
+    """Findings that come in bulk and are shown to the model last, so they never crowd out the rest:
+    papers, and court cases ruled out as another person (one court_research judges dozens at once)."""
+    return f.kind == "work" or (f.kind == "court_docket" and (f.facts.get("match") or {}).get("level") == "ruled out")
+
+
 async def update(dossier_id: str, expert: Candidate, new: list[Finding], known: set[str]) -> Profile:
     """Merge `new` findings into the run's profile and save it as the next version. `known`: the
     ids of all findings of the run. Raises llm.ModelError when the model fails (the old profile stays)."""
     async with _locks[dossier_id]:
         current = store.get_profile(dossier_id)
-        shown = sorted(new, key=lambda f: f.kind == "work")[:NEW_MAX]  # papers last: they come in bulk
+        shown = sorted(new, key=bulk)[:NEW_MAX]
         more = len(new) - len(shown)
         prompt = (f"Expert: {expert.display_name} | {expert.field or 'field unknown'} | "
                   f"{expert.location or 'location unknown'}\n\n"
                   f"Current profile:\n{render(current) or '(empty)'}\n\n"
                   f"New findings:\n" + "\n".join(finding_line(f, with_id=True) for f in shown)
-                  + (f"\n(and {more} more findings, mostly publications)" if more else ""))
+                  + (f"\n(and {more} more findings, mostly publications or same-name court cases ruled out)"
+                     if more else ""))
         data = (await llm.call_model(INSTRUCTIONS, prompt, schema=SCHEMA)).data
         if not isinstance(data, dict):
             raise llm.ModelError("model returned invalid output")

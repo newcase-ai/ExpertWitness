@@ -135,14 +135,33 @@ def to_hit(result: dict) -> dict:
     }
 
 
+class TokenRefused(SourceFailed):
+    """CourtListener refused the API token (HTTP 401/403): the fallback token may still work."""
+
+
 def token() -> str:
-    value = get_settings().courtlistener_token
+    settings = get_settings()
+    value = settings.courtlistener_token or settings.courtlistener_token_fallback
     if not value:
         raise SourceSkipped("COURTLISTENER_TOKEN is not set")
     return value
 
 
 async def get_json(url: str, params: dict | None, valid: Callable[[object], bool], token: str) -> dict:
+    """read_json with `token`; a refused token (HTTP 401/403) is tried once more with
+    COURTLISTENER_TOKEN_FALLBACK when set. Never after a 429: getting past the rate limit with
+    another account breaks gotcha 5 (one account per project)."""
+    try:
+        return await read_json(url, params, valid, token)
+    except TokenRefused:
+        backup = get_settings().courtlistener_token_fallback
+        if not backup or backup == token:
+            raise
+        log.warning("CourtListener refused the main token; trying the fallback token")
+        return await read_json(url, params, valid, backup)
+
+
+async def read_json(url: str, params: dict | None, valid: Callable[[object], bool], token: str) -> dict:
     """One CourtListener read with the hour/day caps, call counting and cache rules (gotcha 5).
     Only a body that passes `valid` is cached or returned. A timeout or a 502-504 is retried once;
     failures raise SourceFailed saying what happened and whether calling again can help."""
@@ -174,7 +193,7 @@ async def get_json(url: str, params: dict | None, valid: Callable[[object], bool
             log.warning("CourtListener HTTP %s; retrying once", r.status_code)
             continue
         if r.status_code != 200:
-            raise SourceFailed(failure(r.status_code))
+            raise (TokenRefused if r.status_code in (401, 403) else SourceFailed)(failure(r.status_code))
         try:
             body = r.json()
         except ValueError:
@@ -193,10 +212,10 @@ async def search_opinions(name: str) -> list[dict]:
     return [to_hit(x) for x in body["results"][:MAX_HITS]]
 
 
-# RECAP (PACER) dockets: federal cases whose filings (or parties, lawyers) name the person. Filings
-# say "reviewed by Dr. Alex Rivera" or "consulting physician", so only the full name is required;
-# the AI same-person check in app/tools/courtlistener.py decides the rest.
-DOCS_PER_CASE = 3
+# RECAP (PACER) dockets: federal cases whose filings (or parties, lawyers) name the person in full.
+# Every hit goes to the research agent, which reads the filings and decides whether it is the same
+# person (app/tools/courtlistener.py; user decision 2026-11-02).
+DOCS_PER_CASE = 3  # the search nests at most 3 matched filings per case; meta.more_docs says more matched
 
 
 def is_docket_body(body: object) -> bool:
@@ -209,11 +228,12 @@ def is_docket_body(body: object) -> bool:
 
 
 def to_docket(result: dict, name: str) -> dict:
-    """One RECAP search result: the case (fields copied by code), the filings that matched (description
-    and link) and `passages`, their highlighted search snippets: in memory only, never stored (gotcha 15)."""
+    """One RECAP search result: the case (fields copied by code) and the filings that matched, each
+    with `passage`, its search snippet: in memory only, never stored (gotcha 15)."""
     docs = [d for d in result.get("recap_documents") or [] if isinstance(d, dict)][:DOCS_PER_CASE]
     named_as = [role for role in ("party", "attorney")
                 if has_full_name(" ".join(text(x) for x in result.get(role) or []), name)]
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
     return {
         "url": SITE + result["docket_absolute_url"],
         "docket_id": result["docket_id"] if isinstance(result.get("docket_id"), int) else None,
@@ -223,11 +243,9 @@ def to_docket(result: dict, name: str) -> dict:
         "date_filed": clean(result.get("dateFiled")),
         "nature_of_suit": clean(result.get("suitNature")),
         "named_as": named_as,
-        "documents": [{"description": clean(d.get("short_description") or d.get("description"))[:200],
-                       "date_filed": clean(d.get("entry_date_filed")),
-                       "url": SITE + d["absolute_url"] if text(d.get("absolute_url")).startswith("/") else None}
-                      for d in docs],
-        "passages": [clean(d.get("snippet"))[:PASSAGE_CHARS] for d in docs if "<mark>" in text(d.get("snippet"))],
+        "more_filings": meta.get("more_docs") is True,
+        "documents": [doc | {"passage": clean(d.get("snippet"))[:PASSAGE_CHARS]}
+                      for d in docs if (doc := to_document(d))],
     }
 
 
@@ -238,13 +256,42 @@ def name_query(name: str) -> str:
     return " OR ".join(f'"{v}"' for v in variants)
 
 
-async def search_dockets(name: str) -> list[dict]:
-    """RECAP dockets naming the person in full (in a filing, or as a party or lawyer), first page."""
+def search_words(words: str) -> str:
+    """The agent's extra search words: words, quoted phrases and AND/OR/NOT; no field, group or
+    wildcard syntax. Unbalanced quotes are dropped."""
+    words = re.sub(r"[^\w\s\"'’.&-]", " ", words)
+    if words.count('"') % 2:
+        words = words.replace('"', " ")
+    return " ".join(words.split())
+
+
+def docket_query(name: str, words: str = "", case_name: str = "") -> str:
+    """The full-name phrases, AND the case name's party key words and the extra words when given."""
+    extra = [case_name_query(case_name)] if case_phrase(case_name) else []
+    extra += [f"({w})"] if (w := search_words(words)) else []
+    return " AND ".join(extra + [f"({name_query(name)})"]) if extra else name_query(name)
+
+
+def is_docket_page(body: object) -> bool:
+    """A well-formed RECAP search page whose `next` link (sent with the token) stays on the API."""
+    nxt = body.get("next") if isinstance(body, dict) else None
+    return is_docket_body(body) and (nxt is None or (isinstance(nxt, str) and nxt.startswith(SEARCH + "?")))
+
+
+async def search_dockets(name: str, words: str = "", case_name: str = "",
+                         next_url: str | None = None) -> tuple[list[dict], int, str | None]:
+    """(dockets, total, next page link): one page of RECAP dockets naming the person in full (in a
+    filing, or as a party or lawyer); `words` and `case_name` narrow the search. `next_url` (from the
+    previous page) reads the next page of the same search."""
     key = token()
     if not name_variants(name):
         raise SourceSkipped("need a given and a family name; surname-only search is not used")
-    body = await get_json(SEARCH, {"type": "r", "q": name_query(name), "highlight": "on"}, is_docket_body, key)
-    return [to_docket(x, name) for x in body["results"][:MAX_HITS]]
+    url, params = (next_url, None) if next_url else (
+        SEARCH, {"type": "r", "q": docket_query(name, words, case_name), "highlight": "on"})
+    body = await get_json(url, params, is_docket_page, key)
+    hits = [to_docket(x, name) for x in body["results"][:MAX_HITS]]
+    total = body.get("count") if isinstance(body.get("count"), int) else len(hits)
+    return hits, total, body.get("next")
 
 
 # Opinion text (DESIGN 4.2 call 3): passages around the candidate's full name, cut by code.
@@ -332,7 +379,7 @@ async def opinion_passages(opinion_id: int, name: str) -> list[str]:
     return passages(opinion_text(body), name)
 
 
-# Testimony list check (PLAN M3 3k): is a named case in CourtListener, and does it name the person?
+# A case name in a docket search (search_dockets `case_name`): its parties' key words.
 
 
 def case_phrase(case_name: str) -> str:
@@ -394,38 +441,7 @@ def case_name_query(case_name: str) -> str:
     return "caseName:(" + " AND ".join(f'"{k}"' for k in keys) + ")"
 
 
-def case_query(case_name: str, name: str) -> str:
-    return f"{case_name_query(case_name)} AND ({name_query(name)})"
-
-
-def case_score(result: dict, court: str | None, year: int | None) -> int:
-    score = 0
-    if year and text(result.get("dateFiled")).startswith(str(year)):
-        score += 2
-    found, wanted = fold(text(result.get("court"))), fold(court or "").strip()
-    if wanted and found and (wanted in found or found in wanted):
-        score += 1
-    return score
-
-
-async def find_case(case_name: str, name: str, court: str | None = None, year: int | None = None) -> dict | None:
-    """One RECAP docket search for a case by name whose filings (or parties) also name the person in
-    full. Several hits: the one matching `year` (date filed) and `court` wins, else the first. The
-    docket as `to_docket` gives it (passages from the search snippets, no second call). None if not found."""
-    key = token()
-    if not name_variants(name):
-        raise SourceSkipped("need a given and a family name; surname-only search is not used")
-    if not case_phrase(case_name):
-        return None
-    body = await get_json(SEARCH, {"type": "r", "q": case_query(case_name, name), "highlight": "on"},
-                          is_docket_body, key)
-    results = body["results"][:MAX_HITS]
-    if not results:
-        return None
-    return to_docket(max(results, key=lambda r: case_score(r, court, year)), name)  # max keeps the first of equals
-
-
-# Filings of one docket, to download (app/tools/court_files.py). The list and the text come from the
+# Filings of one docket, to download (app/tools/courtlistener.py). The list and the text come from the
 # API (token, caps, cache); the PDF itself from the public storage host: no token, not an API call.
 STORAGE = "https://storage.courtlistener.com/"
 STORAGE_HOST = "storage.courtlistener.com"
@@ -449,11 +465,11 @@ def is_documents_body(body: object) -> bool:
 
 
 def to_document(result: dict) -> dict | None:
-    """One public filing, or None (not available, no file, odd id or path)."""
-    if result.get("is_available") is not True or not isinstance(result.get("id"), int):
+    """One filing, or None (odd id or link). `available` (downloadable): public, with a safe file path."""
+    url = text(result.get("absolute_url"))
+    if not isinstance(result.get("id"), int) or not url.startswith("/"):
         return None
-    if not safe_path(result.get("filepath_local")):
-        return None
+    available = result.get("is_available") is True and safe_path(result.get("filepath_local"))
     number, attachment, pages = (result.get(k) for k in ("document_number", "attachment_number", "page_count"))
     return {
         "id": result["id"],
@@ -462,8 +478,9 @@ def to_document(result: dict) -> dict | None:
         "attachment_number": attachment if isinstance(attachment, int) else None,
         "date_filed": clean(result.get("entry_date_filed")),
         "page_count": pages if isinstance(pages, int) else None,
-        "filepath_local": result["filepath_local"],
-        "url": SITE + result["absolute_url"],
+        "available": available,
+        "filepath_local": result["filepath_local"] if available else None,
+        "url": SITE + url,
     }
 
 
@@ -477,7 +494,7 @@ async def docket_documents(docket_id: int) -> tuple[list[dict], bool]:
     out = []
     for _ in range(MAX_DOC_PAGES):  # ponytail: filings past 5 pages (100) are not listed, only flagged
         body = await get_json(url, params, is_documents_body, key)
-        out += [d for d in map(to_document, body["results"]) if d]
+        out += [d for d in map(to_document, body["results"]) if d and d["available"]]
         url, params = body.get("next"), None  # the next link already holds the query and cursor
         if not url:
             break
