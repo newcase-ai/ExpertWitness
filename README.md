@@ -8,6 +8,12 @@ Search for an expert witness, then view their research profile and ask questions
 
 Layout, conventions and the numbered gotchas: [CLAUDE.md](CLAUDE.md).
 
+## See a result without running the app
+
+[docs/demo/expert-profile-demo.html](docs/demo/expert-profile-demo.html) is a one-file snapshot of the results
+page for a fictional expert (all names, cases and links are made up). Download it and open it in a browser:
+the tabs and pop-ups work, no app or install needed.
+
 ## Run
 
 ```sh
