@@ -1,8 +1,8 @@
 """Ask a PDF (DESIGN tool 4): one question about a page range of one saved PDF. The pages' text is
 taken out with pypdf (the Meta Model API reads no PDF files) and sent to the model, each page under
 a "[Page N]" line, with the question and the main agent's context, so a PDF too big for one model
-call is read one range at a time. Nothing is saved: the answer goes to the main agent only. Every
-problem comes back as an error the main agent can act on."""
+call is read one range at a time. An answer is also saved as a `file_fact` finding, so the profile
+gets what the file says. Every problem comes back as an error the main agent can act on."""
 
 import asyncio
 import re
@@ -12,11 +12,15 @@ from pypdf import PdfReader
 from pypdf.errors import PyPdfError
 
 from app import llm, memory
-from app.evidence import refuse
+from app.evidence import copied, refuse, squash
 from app.tools import Ctx, tool
 
 ANSWER_MAX = 2_000
 NOT_FOUND = "NOT IN PAGES"
+# Case names and docket numbers are copied word for word (up to ~100 characters seen in a real CV
+# list); a longer copied run is a passage of the file, and that answer is not saved (gotcha 15).
+FILE_COPY_RUN = 150
+FACT_NOTE = "from a downloaded file; verify at the source"
 TITLE_SHOWN = 60
 FILES_TEXT_MAX = 4_000  # characters of the file list in an unknown-file refusal
 NO_TEXT = "these pages have no text (a scanned PDF?): this tool reads a PDF's text layer, or a court filing's OCR text"
@@ -82,9 +86,9 @@ async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, questi
     give good context: who the expert is, what you are looking for and why, and what you already
     found or ruled out (e.g. "pages 1-100 had no list of prior cases"). Keep the range to about
     100 pages: a bigger range can go over the model's token limit and fail. To search a long file, call
-    again with the next range. `answer` is null when these pages do not answer; `page_count` is the
-    file's number of pages and `pages` the range actually read. An `error` says what to fix before
-    calling again."""
+    again with the next range. `answer` is null when these pages do not answer; an answer is saved
+    as a finding (`ref`) and the profile is updated from it. `page_count` is the file's number of
+    pages and `pages` the range actually read. An `error` says what to fix before calling again."""
     row = memory.file(file_id)
     if not row or row["dossier_id"] != ctx.dossier_id:
         return refuse(f"unknown file: use one of this expert's file_ids: {known_files(ctx)}")
@@ -109,5 +113,11 @@ async def ask_pdf(ctx: Ctx, file_id: str, page_start: int, page_end: int, questi
         too_big = "HTTP 400" in str(e) or "timed out" in str(e)  # token limit or slow: fewer pages may work
         return refuse(f"{e}." + (" If the page range is big, try fewer pages." if too_big else ""))
     ctx.log(f"pages {page_start}-{page_end} of {count}")
-    return {"answer": None if not answer or answer.startswith(NOT_FOUND) else answer[:ANSWER_MAX],
-            "pages": f"{page_start}-{page_end}", "page_count": count}
+    pages = f"{page_start}-{page_end}"
+    if not answer or answer.startswith(NOT_FOUND):
+        return {"answer": None, "ref": None, "pages": pages, "page_count": count}
+    answer = answer[:ANSWER_MAX]
+    ref = None if copied(answer, squash(text), FILE_COPY_RUN) else ctx.add_finding(
+        "file_fact", question, row["source_url"], note=FACT_NOTE,
+        facts={"file_id": file_id, "pages": pages, "facts": [answer]})
+    return {"answer": answer, "ref": ref, "pages": pages, "page_count": count}

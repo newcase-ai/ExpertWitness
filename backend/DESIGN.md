@@ -969,6 +969,13 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
   1,000 chars, copy-checked, so no long verbatim quotes). If the answer is a fact about the expert,
   saves kind `file_fact` (url = the file's `source_url`, confidence `low`, note "from a downloaded
   file; verify at the source", facts `{file_id, question, answer}`).
+- As built (2026-11-03): pypdf pages `page_start`-`page_end`, answer at most 2,000 chars. Every
+  answer is saved as `file_fact` (title = the question, facts `{file_id, pages, facts: [answer]}`),
+  so the profile gets what files say; without it a run's CV case list never reached the profile.
+  Copy check at `FILE_COPY_RUN` = 150 chars, not `COPY_RUN` 40: case names and docket numbers are
+  copied word for word (28-102 chars in a real CV list, 11 of 16 answers over 40); a longer run is
+  a passage, and that answer is returned but not saved. `profile.finding_line` keeps a `file_fact`
+  line whole (`FACT_LINE_MAX`), not cut to `LINE_MAX`.
 - Reading PDFs without a text version: the engineer's choice; a new dependency (e.g. `pypdf`) needs
   the lead's OK.
 - Reply: `{"answer", "ref": ref|null}`; unknown or other dossier's `file_id` -> `refuse("unknown file")`.
