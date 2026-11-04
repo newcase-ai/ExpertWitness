@@ -15,6 +15,7 @@ export type Involvement =
   | 'Mentioned'
   | 'Expert witness'
   | 'Consultant or reviewer'
+  | 'Party'
 
 export interface ExpertCase {
   year: number
@@ -23,6 +24,8 @@ export interface ExpertCase {
   court: string
   side: Side
   involvement: Involvement
+  url?: string // the case's docket: the name links here
+  summary?: string // what the expert did in the case
 }
 
 export interface Fact {
@@ -30,12 +33,14 @@ export interface Fact {
   value: string
   flag?: boolean // something opposing counsel could use
   details?: Entry[] // shown in the popup; empty means nothing was found
+  links?: string[] // pages it came from
 }
 
 export interface Entry {
   title: string
   detail: string
   url?: string // where it came from: the title links here
+  why?: string // why it matters (red flags)
 }
 
 export interface Role {
@@ -43,6 +48,7 @@ export interface Role {
   org: string
   dates?: string
   current?: boolean
+  links?: string[] // pages it came from
 }
 
 export interface ExpertProfile {

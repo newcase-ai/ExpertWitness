@@ -1,15 +1,18 @@
 import { useState, type ReactNode } from 'react'
-import { CARD, Disclaimer, Pending, Sources, SubHeading } from '@/components/profile/common'
+import { CARD, Disclaimer, Pending, SourceLinks, Sources, SubHeading } from '@/components/profile/common'
 import { FactGrid } from '@/components/profile/FactGrid'
 import { CaseList, LitigationTimeline } from '@/components/profile/Litigation'
 import { Career, EntryList, Facts, QualificationHighlights } from '@/components/profile/lists'
 import type { SectionStatus } from '@/lib/api'
+import { RED_FLAGS } from '@/lib/expert-profile-view'
 import type { ResearchProfile as Profile } from '@/lib/research-profile'
-import { LoaderCircle } from 'lucide-react'
+import type { Fact } from '@/lib/types'
+import { LoaderCircle, TriangleAlert } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 const TABS = [
   ['overview', 'Overview'],
+  ['flags', 'Red flags'], // shown only when some were found
   ['cases', 'Cases and testimony'],
   ['background', 'Background'],
   ['publications', 'Publications'],
@@ -35,13 +38,16 @@ export function ResearchProfile({
   running,
   now,
   actions,
+  photo,
 }: {
   p: Profile
   running: boolean
   now?: string // the latest tool call's label, while running
   actions?: ReactNode
+  photo?: string // image URL; the initials are shown when it is missing or fails to load
 }) {
   const [tab, setTab] = useState<Tab>('overview')
+  const [noPhoto, setNoPhoto] = useState(false)
   const count = (i: string) => p.cases.filter((c) => c.involvement === i).length
   const tiles = (
     [
@@ -51,14 +57,20 @@ export function ResearchProfile({
       [p.publications.length, 'publications'],
     ] as [number, string][]
   ).filter(([n]) => n > 0) // a count of 0 is not shown
+  const redFlags = p.risk.find((f) => f.label === RED_FLAGS && f.flag)
 
   return (
     <div>
       <div className="mx-auto flex max-w-[1120px] flex-col gap-6 px-4 pt-10">
         <div className="flex flex-wrap items-center gap-4">
-          <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-primary/10 font-serif text-xl font-semibold text-primary">
-            {p.initials}
-          </span>
+          {photo && !noPhoto ? (
+            <img src={photo} alt={p.name} onError={() => setNoPhoto(true)}
+              className="size-14 shrink-0 rounded-full object-cover" />
+          ) : (
+            <span className="flex size-14 shrink-0 items-center justify-center rounded-full bg-primary/10 font-serif text-xl font-semibold text-primary">
+              {p.initials}
+            </span>
+          )}
           <div className="min-w-0 flex-[1_1_320px]">
             <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Expert profile</p>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -82,7 +94,7 @@ export function ResearchProfile({
         {running && <ResearchingPanel now={now} />}
         <div className="overflow-x-auto">
           <div role="tablist" aria-label="Profile sections" className="inline-flex gap-0.5 rounded-[10px] border bg-card/80 p-[3px] backdrop-blur-md">
-            {TABS.map(([id, label]) => (
+            {TABS.filter(([id]) => id !== 'flags' || redFlags).map(([id, label]) => (
               <button
                 key={id}
                 type="button"
@@ -90,13 +102,21 @@ export function ResearchProfile({
                 aria-selected={tab === id}
                 onClick={() => setTab(id)}
                 className={cn(
-                  'whitespace-nowrap rounded-lg px-3.5 py-1.5 text-[13px] font-medium',
+                  'flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-1.5 text-[13px] font-medium',
                   tab === id
                     ? 'bg-primary text-primary-foreground'
-                    : 'text-muted-foreground hover:text-foreground'
+                    : id === 'flags'
+                      ? 'text-amber-700 hover:text-amber-900 dark:text-amber-400'
+                      : 'text-muted-foreground hover:text-foreground'
                 )}
               >
+                {id === 'flags' && <TriangleAlert className="size-3.5" />}
                 {label}
+                {id === 'flags' && (
+                  <span className="rounded-full bg-amber-500 px-1.5 text-[11px] font-bold leading-4 text-white">
+                    {redFlags?.details?.length}
+                  </span>
+                )}
               </button>
             ))}
           </div>
@@ -109,7 +129,14 @@ export function ResearchProfile({
           <div className="grid gap-4 @3xl:grid-cols-3">
             <section className={cn(CARD, 'space-y-4 @3xl:col-span-2')}>
               <h2 className="font-serif text-lg font-semibold">Summary</h2>
-              {p.qualifications ? <p className="text-[15px] leading-7">{p.qualifications}</p> : <Empty running={running} />}
+              {p.qualifications ? (
+                <div>
+                  <p className="text-[15px] leading-7">{p.qualifications}</p>
+                  <SourceLinks urls={p.qualificationsLinks} />
+                </div>
+              ) : (
+                <Empty running={running} />
+              )}
               {tiles.length > 0 && (
                 <div className="grid grid-cols-2 gap-4 border-t pt-4 @xl:grid-cols-4">
                   {tiles.map(([n, label]) => (
@@ -129,6 +156,7 @@ export function ResearchProfile({
                     <div key={c.label}>
                       <dt className="text-xs text-muted-foreground">{c.label}</dt>
                       <dd className="break-words text-sm">{c.value}</dd>
+                      <SourceLinks urls={c.links} />
                     </div>
                   ))}
                 </dl>
@@ -152,6 +180,13 @@ export function ResearchProfile({
               {p.cases.length ? <CaseList cases={p.cases.slice(0, 3)} /> : <Empty running={running} />}
             </section>
           </div>
+        )}
+
+        {tab === 'flags' && redFlags && (
+          <section className={CARD}>
+            <SubHeading note="Weak spots in this expert's record, with their sources">{RED_FLAGS}</SubHeading>
+            <FlagList fact={redFlags} />
+          </section>
         )}
 
         {tab === 'cases' && (
@@ -235,12 +270,50 @@ export function ResearchProfile({
         {tab === 'sources' && (
           <section className={cn(CARD, 'space-y-4')}>
             <SubHeading note="Where this profile's information comes from">Sources</SubHeading>
-            <Sources sources={p.sources} />
+            {p.sourceLinks ? <EntryList entries={p.sourceLinks} /> : <Sources sources={p.sources} />}
             <Disclaimer />
           </section>
         )}
       </div>
     </div>
+  )
+}
+
+// The red flags tab: each one with the sites it came from, linked to the first.
+function FlagList({ fact }: { fact: Fact }) {
+  return (
+    <ol className="divide-y">
+      {(fact.details ?? []).map((d, i) => (
+        <li key={d.title} className="flex gap-3 py-3 first:pt-0 last:pb-0">
+          <span className="w-5 shrink-0 text-right text-sm font-semibold text-amber-700 dark:text-amber-400">{i + 1}.</span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium">
+              {d.url ? (
+                <a href={d.url} target="_blank" rel="noreferrer" className="hover:text-primary hover:underline">
+                  {d.title}
+                </a>
+              ) : (
+                d.title
+              )}
+            </div>
+            {d.detail && <p className="mt-0.5 text-[13px] text-muted-foreground">{d.detail}</p>}
+            {d.why && (
+              <div className="mt-2 space-y-2 rounded-md bg-amber-50 px-3 py-2.5 text-[13px] leading-relaxed dark:bg-amber-500/10">
+                {d.why.split('\n\n').map((para) => {
+                  const [, label, text] = para.match(/^(What this is|Why it matters): ([\s\S]*)$/) ?? ['', '', para]
+                  return (
+                    <p key={para}>
+                      {label && <span className="font-semibold text-amber-800 dark:text-amber-300">{label}: </span>}
+                      {text}
+                    </p>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </li>
+      ))}
+    </ol>
   )
 }
 

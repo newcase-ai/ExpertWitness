@@ -1,7 +1,9 @@
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 
 from app import expert_profile, http, jobs, llm, memory, store
 from app.config import get_settings
@@ -168,6 +170,18 @@ async def rebuild_expert_profile(dossier_id: str) -> ExpertProfileView:
     except llm.ModelError as exc:
         raise HTTPException(502, str(exc)) from exc
     return expert_profile.view(dossier_id)
+
+
+@app.get("/dossiers/{dossier_id}/photo")
+def get_photo(dossier_id: str) -> FileResponse:
+    """The expert's photo: data/files/<dossier_id>/photo.*; 404 when there is none."""
+    # ponytail: the photo is put there by hand; no tool finds photos yet
+    if store.get_research(dossier_id) is None:
+        raise HTTPException(404, "dossier not found")
+    photo = next((Path(get_settings().database_path).parent / "files" / dossier_id).glob("photo.*"), None)
+    if photo is None:
+        raise HTTPException(404, "no photo")
+    return FileResponse(photo)
 
 
 @app.get("/dossiers/{dossier_id}/files")

@@ -430,6 +430,7 @@ class Case(BaseModel):
     url: str
     nature_of_suit: str | None = None
     involvement: str | None = None  # the court tool's role: "consultant or reviewer", "expert witness", ...
+    summary: str | None = None  # what the expert did in the case
     side: Literal["plaintiff", "defense", "unknown"] = "unknown"
     refs: list[str]
     confidence: Confidence

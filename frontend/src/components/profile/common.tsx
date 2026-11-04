@@ -1,6 +1,26 @@
+import { ExternalLink } from 'lucide-react'
+import { host } from '@/lib/research-profile'
 import { cn } from '@/lib/utils'
 
 export const CARD = 'rounded-xl border bg-card p-5'
+
+// Where a value came from: each site once, linked to its first page (the Sources tab lists them all).
+export function SourceLinks({ urls }: { urls?: string[] }) {
+  const byHost = new Map<string, string>()
+  for (const u of urls ?? []) if (!byHost.has(host(u))) byHost.set(host(u), u)
+  if (!byHost.size) return null
+  return (
+    <span className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5">
+      {[...byHost].map(([h, u]) => (
+        <a key={h} href={u} title={u} target="_blank" rel="noreferrer"
+          className="inline-flex items-center gap-1 text-xs font-normal text-muted-foreground hover:text-primary hover:underline">
+          <ExternalLink className="size-3" />
+          {h}
+        </a>
+      ))}
+    </span>
+  )
+}
 
 export function Pending({ className }: { className?: string }) {
   return (

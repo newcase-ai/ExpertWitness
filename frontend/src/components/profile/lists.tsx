@@ -1,6 +1,7 @@
 import { Entry, Fact, Role } from '@/lib/types'
 import { cn } from '@/lib/utils'
 import { MARKED, MarkNote, MarkNum, useMarkOf } from '@/components/profile/highlights'
+import { SourceLinks } from '@/components/profile/common'
 
 export function QualificationHighlights({ facts }: { facts: Fact[] }) {
   const markOf = useMarkOf()
@@ -19,6 +20,7 @@ export function QualificationHighlights({ facts }: { facts: Fact[] }) {
               {h.label}
             </dt>
             <dd className="mt-0.5 text-sm font-medium leading-snug">{h.value}</dd>
+            <SourceLinks urls={h.links} />
             <MarkNote mark={mark} />
           </div>
         )
@@ -44,6 +46,7 @@ export function Facts({ facts }: { facts: Fact[] }) {
               {f.label}
             </dt>
             <dd className="text-sm leading-snug">{f.value}</dd>
+            <SourceLinks urls={f.links} />
             <MarkNote mark={mark} />
           </div>
         )
@@ -110,6 +113,7 @@ export function Career({ roles }: { roles: Role[] }) {
                 {r.org}
                 {r.dates && ` · ${r.dates}`}
               </div>
+              <SourceLinks urls={r.links} />
               <MarkNote mark={mark} />
             </div>
           </li>

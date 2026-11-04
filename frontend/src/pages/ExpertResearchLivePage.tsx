@@ -159,10 +159,12 @@ export default function ExpertResearchLivePage() {
         )}
         {view ? (
           <ResearchProfile
+            key={dossierId} // a new run gets a fresh photo check
             p={view}
             running={running}
             now={job?.activity.at(-1)?.label}
             actions={debugToggle}
+            photo={`/api/dossiers/${dossierId}/photo`}
           />
         ) : (
           !error && <p className="mx-auto max-w-[1120px] px-4 pt-10 text-sm text-muted-foreground">Loading profile…</p>

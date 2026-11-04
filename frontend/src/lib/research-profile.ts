@@ -32,6 +32,8 @@ export interface ResearchProfile extends ExpertProfile {
   credentials: Entry[]
   notHim: Entry[]
   authorStats: string | null
+  qualificationsLinks?: string[] // pages the summary came from
+  sourceLinks?: Entry[] // every cited page, linked (structured profile only)
   // From the structured profile: a section whose status is 'not_checked' says so instead of "Nothing found".
   status?: Partial<Record<'career' | 'credentials' | 'cases' | 'publications' | 'online', SectionStatus>>
 }
