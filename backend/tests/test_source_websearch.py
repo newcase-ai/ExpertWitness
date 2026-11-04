@@ -134,7 +134,7 @@ def test_websearch_one_query_drops_blocked_and_caps_the_query(sources):
     ("Alex Rivera linked\ufeffin.com", True),  # BOM
     ("Alex Rivera linked\u00adin.com", True),  # soft hyphen
     ("Alex Rivera site:linkedin.\u200bcom", True),
-    ("Gary Stanton expert witness Michigan", False),
+    ("Alex Rivera expert witness Michigan", False),
     ("Smith v. Jones 2019", False),
     ("Alex Rivera notlinkedin.com", False),
 ])
@@ -147,8 +147,8 @@ def test_websearch_query_naming_a_banned_site(query, blocked):
 SNIPPET = "SYNTHETIC-WEB-SNIPPET Alex J. Rivera holds an active medical licence in Ohio since the year 2004 per board"
 FACT_RESULTS = [
     {"url": "https://board.example.gov/lookup/rivera", "title": "Alex J. Rivera - licence record", "snippet": SNIPPET},
-    {"url": "https://www.linkedin.com/in/alex-rivera", "title": "Alex Rivera | LinkedIn", "snippet": "blocked"},
-    {"url": "https://news.example.com/other", "title": "Local news", "snippet": "A different Alex Morgan story"},
+    {"url": "https://www.linkedin.com/in/x", "title": "Alex Rivera | LinkedIn", "snippet": "blocked"},
+    {"url": "https://news.example.com/other", "title": "Local news", "snippet": "A different Alex Sample story"},
 ]
 FACT_RESULTS_2 = [
     {"url": "https://board.example.gov/lookup/rivera", "title": "duplicate", "snippet": SNIPPET},

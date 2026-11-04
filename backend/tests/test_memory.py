@@ -87,7 +87,7 @@ LUHN_ORCIDS = ["0000-4114-4269-4203", "0009-4104-0901-6104", "0000-3303-6148-110
 
 @pytest.mark.parametrize("text", [*(f"ORCID {o}" for o in LUHN_ORCIDS), f"https://orcid.org/{LUHN_ORCIDS[0]}",
                                   "ISBN 9780306406157", "ISBN 979-1-0000-0000-9", "isbn:9781000000006",
-                                  "doi 10.1007/s00415-019-09213-x"])
+                                  "doi 10.5555/s12345-019-00009-x"])
 def test_no_secret_lets_orcid_ids_isbn13_and_dois_through(text):
     assert memory.no_secret(text) == text
 

@@ -32,7 +32,7 @@ async def exclusion_check(ctx: Ctx) -> dict:
     refs = []
     for i, m in enumerate(matches, 1):
         # Every row links the same OIG search page: a #fragment keeps each match its own finding,
-        # since the same kind + URL returns the existing ref (PLAN gotcha 49).
+        # since the same kind + URL returns the existing ref (gotcha 49).
         ref = ctx.add_finding(
             "leie_possible_match", f"OIG exclusion list: possible match ({m.get('general') or 'unknown category'})",
             f"{m['url']}#possible-match-{i}", facts={k: m.get(k) for k in FACT_KEYS}, confidence="low",

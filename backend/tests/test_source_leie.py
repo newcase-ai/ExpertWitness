@@ -16,7 +16,7 @@ ROWS = """\
 RIVERA,ALEX,J,,IND- LIC HC SERV PRO,NURSING,U0001,0000000001,19700101,1 SYNTHETIC ST,TESTVILLE,OH,00001,1128a1,20200115,00000000,00000000,
 RIVERA,ALEX,,,IND- LIC HC SERV PRO,PHARMACY,,0,19710202,2 SYNTHETIC ST,TESTVILLE,TX,00002,1128b4,20210220,00000000,00000000,
 RIVERA,ALEX,Q,,IND- LIC HC SERV PRO,DENTIST,,0,19720303,3 SYNTHETIC ST,TESTVILLE,CA,00003,1128b4,20220325,00000000,00000000,
-OKAFOR,DANA,,,IND- LIC HC SERV PRO,NURSING,,0,19730404,4 SYNTHETIC ST,TESTVILLE,NY,00004,1128a1,20230430,00000000,00000000,
+EXAMPLE,DANA,,,IND- LIC HC SERV PRO,NURSING,,0,19730404,4 SYNTHETIC ST,TESTVILLE,NY,00004,1128a1,20230430,00000000,00000000,
 RIVERA,ALEXANDRA,,,IND- LIC HC SERV PRO,NURSING,,0,19740505,5 SYNTHETIC ST,TESTVILLE,FL,00005,1128a1,20240505,00000000,00000000,
 ,,,SYNTHETIC CLINIC LLC,BUSINESS,CLINIC,,0,,6 SYNTHETIC ST,TESTVILLE,WA,00006,1128b5,20190101,00000000,00000000,
 """
@@ -60,13 +60,13 @@ def test_one_name_part_never_matches():
 def test_fresh_copy_is_not_downloaded_again(sources):
     write_csv(age_days=10)
     _, seen = sources()
-    assert len(asyncio.run(leie.possible_matches("Dana", "Okafor"))) == 1
+    assert len(asyncio.run(leie.possible_matches("Dana", "Example"))) == 1
     assert seen == []
 
 
 def test_missing_or_old_copy_is_downloaded(sources):
     _, seen = sources(routes={"oig.hhs.gov": lambda request: httpx.Response(200, content=CSV)})
-    assert len(asyncio.run(leie.possible_matches("Dana", "Okafor"))) == 1
+    assert len(asyncio.run(leie.possible_matches("Dana", "Example"))) == 1
     assert str(seen[0].url) == leie.CSV_URL
     assert leie.csv_path().read_bytes() == CSV
 
@@ -74,13 +74,13 @@ def test_missing_or_old_copy_is_downloaded(sources):
 def test_failed_download_uses_old_copy_or_raises(sources):
     sources(routes={"oig.hhs.gov": (503, {})})
     with pytest.raises(RuntimeError, match="503"):
-        asyncio.run(leie.possible_matches("Dana", "Okafor"))
+        asyncio.run(leie.possible_matches("Dana", "Example"))
     write_csv(age_days=60)
-    assert len(asyncio.run(leie.possible_matches("Dana", "Okafor"))) == 1
+    assert len(asyncio.run(leie.possible_matches("Dana", "Example"))) == 1
 
 
 def test_error_page_is_not_saved(sources):
     sources(routes={"oig.hhs.gov": lambda request: httpx.Response(200, content=b"<html>maintenance</html>")})
     with pytest.raises(RuntimeError, match="expected CSV"):
-        asyncio.run(leie.possible_matches("Dana", "Okafor"))
+        asyncio.run(leie.possible_matches("Dana", "Example"))
     assert not leie.csv_path().exists()

@@ -114,7 +114,7 @@ def test_long_page_reply_fits_result_max(tool_ctx, sources, with_key):
 
 
 @pytest.mark.parametrize(("final", "refusal"), [
-    ("https://www.linkedin.com/in/alex-rivera", "source not available"),  # Firecrawl's own check
+    ("https://www.linkedin.com/in/x", "source not available"),  # Firecrawl's own check
     ("https://www.courtlistener.com/opinion/1/x/", API_SITE),  # gotcha 40
 ])
 def test_read_redirect_to_banned_or_api_site_is_refused(tool_ctx, sources, with_key, final, refusal):
@@ -239,9 +239,9 @@ def test_403_fails_once_without_a_block(tool_ctx, sources, with_key):
     ("http://[::1]/", BAD_URL),  # IP literals in brackets
     ("http://[::ffff:127.0.0.1]/", BAD_URL),
     # disguised banned / API hosts: percent-encoded, full-width letters or dot, backslash tricks
-    ("https://www.%6Cinkedin.com/in/alex-rivera", BAD_URL),
-    ("https://www.\uff4c\uff49\uff4e\uff4b\uff45\uff44\uff49\uff4e.com/in/alex-rivera", BAD_URL),
-    ("https://www.linkedin\uff0ecom/in/alex-rivera", BAD_URL),
+    ("https://www.%6Cinkedin.com/in/x", BAD_URL),
+    ("https://www.\uff4c\uff49\uff4e\uff4b\uff45\uff44\uff49\uff4e.com/in/x", BAD_URL),
+    ("https://www.linkedin\uff0ecom/in/x", BAD_URL),
     ("https://www.courtlistener.com\\.example.org/opinion/1/x/", BAD_URL),
     ("https://dauberttracker.com\\.example.org/", BAD_URL),
     ("https://www.%63ourtlistener.com/opinion/1/x/", BAD_URL),
@@ -250,7 +250,7 @@ def test_403_fails_once_without_a_block(tool_ctx, sources, with_key):
     ("javascript:alert(1)", BAD_URL),
     ("https://example.org/" + "a" * 2_000, URL_TOO_LONG),
     ("https://www.courtlistener.com/opinion/1/x/", API_SITE),
-    ("https://www.linkedin.com/in/alex-rivera", BANNED_SITE),
+    ("https://www.linkedin.com/in/x", BANNED_SITE),
 ])
 @pytest.mark.parametrize("tool_name", ["read_web_page", "download_file"])
 def test_bad_or_refused_urls_never_fetched(tool_ctx, sources, with_key, url, refusal, tool_name):
@@ -351,7 +351,7 @@ def test_pdf_gets_the_longer_firecrawl_time_limit(tool_ctx, sources, with_key):
 
 
 @pytest.mark.parametrize(("to", "refusal"), [
-    ("https://www.linkedin.com/in/alex-rivera", BANNED_SITE),
+    ("https://www.linkedin.com/in/x", BANNED_SITE),
     ("https://www.courtlistener.com/opinion/1/x/", API_SITE),
     ("http://127.0.0.1/admin", INTERNAL),
     ("/../../user@evil.example.com", None),  # relative Location: joined, stays on files.example.org

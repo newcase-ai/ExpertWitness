@@ -109,12 +109,12 @@ Rules:
   website, expert directory). Copy address, phone, email and website exactly as written in the cited
   file or finding. Never a home address or personal accounts. If the source labels a phone as a cell,
   say so in `note`. based_in: city and state. current_role: the main current job title and employer.
-- headline: one line, e.g. "Geriatrician and internist, former hospital chief medical officer".
+- headline: one line, e.g. "Orthopedic surgeon, former hospital chief of orthopedics".
   specialties: the expert's fields (2-5). expertise_tags: 3-8 short topic tags for case work.
   summary: 3-5 plain sentences on qualifications, each backed by its refs.
-- highlights: key numbers as label and short value, e.g. "Experience": "40+ years",
-  "Board certification": "Internal medicine (1983)", "Licensed": "Arizona", "Depositions (4 yrs)": "5",
-  "Work split": "Plaintiff and defense", "Publications": "250+ (self-reported)".
+- highlights: key numbers as label and short value, e.g. "Experience": "15 years",
+  "Board certification": "Orthopaedic surgery (2012)", "Licensed": "Ohio", "Depositions (4 yrs)": "12",
+  "Work split": "Mostly defense", "Publications": "30+ (self-reported)".
 - career: one row per role with years; current=true for roles to the present. education, licenses
   (status "active" or "expired" only when a source says so), board_certifications, affiliations
   (hospital and academic appointments), memberships, fees (as written, e.g. "$650/hr record review").

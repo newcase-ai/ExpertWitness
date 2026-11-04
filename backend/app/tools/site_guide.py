@@ -54,7 +54,7 @@ INSTRUCTIONS = (
     "document = a file such as a PDF), what it gets, the link number, and every part of that link "
     "that changes from one record or query to another: the exact text of the part in the link (for "
     "example \"2026\"), a short lower-case name (for example \"year\") and what to put there. Name "
-    "every changing part, for example both the year and the number in 2026-Ohio-4232. Prefer links "
+    "every changing part, for example both the year and the number in 2026-Ohio-0000. Prefer links "
     "whose URL holds a query, a case number, a name or an id; skip links to one fixed page. Then what "
     "a results page shows and links to, how pages are numbered if they are, and searches the site "
     "offers that cannot be done by URL (not in the forms list). Never give a URL pattern for a page "
@@ -122,7 +122,7 @@ def clean_domain(domain: str) -> str | None:
 
 def links_of(page: dict, domain: str) -> list[tuple[str, str]]:
     """(text, absolute URL) of the page's links on `domain`. Fragments are removed, except app routes
-    such as `#/caseinfo/2026/1480`, which are the page itself on script-driven sites."""
+    such as `#/caseinfo/2026/0000`, which are the page itself on script-driven sites."""
     out = []
     for text, href in LINK.findall(page["markdown"]):
         url = urljoin(page["url"], href)

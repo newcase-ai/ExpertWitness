@@ -18,7 +18,7 @@ BLOCKED_DOMAINS = (
     "docinfo.org",
 )
 
-# Titles and suffixes are not names: "Dr. Loftus" has no given name (gotcha 13).
+# Titles and suffixes are not names: "Dr. Rivera" has no given name (gotcha 13).
 TITLES = frozenset({
     "dr", "drs", "dra", "doctor", "prof", "professor", "mr", "mrs", "ms", "miss", "mx", "sir", "dame",
     "hon", "judge", "justice", "rev", "reverend", "fr", "father", "sister", "det", "detective", "officer",

@@ -81,6 +81,9 @@ export default function CaseContextPage() {
   return (
     <div className="min-h-screen text-sm">
       <AppHeader />
+      <p className="border-b px-4 py-2 text-center text-xs text-muted-foreground">
+        Design mockup with sample data. Real research results are under Searches.
+      </p>
       <main className="mx-auto flex max-w-[1120px] flex-col gap-5 px-4 pb-12 pt-6">
         <div className="space-y-1">
           <Link

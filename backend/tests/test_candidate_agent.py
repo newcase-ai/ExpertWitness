@@ -291,8 +291,8 @@ def test_accented_names_match_unaccented_search(sources):
     assert [c.display_name for c in candidates] == ["José M. García"]
 
 
-DIR_A = "https://www.seakexperts.com/members/1-alex-rivera"
-DIR_B = "https://www.imenet.com/members/alex-rivera"
+DIR_A = "https://www.seakexperts.com/members/0000-alex-rivera"
+DIR_B = "https://www.imenet.com/members/0000-alex-rivera"
 
 
 NO_OTHER_SOURCES = {"api.openalex.org": (200, {"results": []}), "www.courtlistener.com": (200, {"results": []})}
@@ -326,7 +326,7 @@ def test_listings_in_one_state_or_without_one_stay_together(sources, loc_a, loc_
 
 
 def test_listings_in_different_states_are_split_by_state(sources):
-    dir_c = "https://www.jurispro.com/profile/alex-rivera"
+    dir_c = "https://www.jurispro.com/profile/0000-alex-rivera"
     merged, pages = guarded(["Columbus, Ohio", "Houston, TX", "Dallas, Texas", None],
                             person_location="Columbus, OH", urls=(DIR_A, DIR_B, dir_c, CLINIC))
     sources(NO_OTHER_SOURCES, model=FakeModel(web=[[], pages], json=[{"people": [merged]}]))
@@ -353,7 +353,7 @@ def test_split_keeps_court_and_stateless_listings_together(sources):
     # two plain listings, no field, different sites: never merged on name alone
     ((DIR_A, DIR_B), None, 2, "Kept apart: the listings share no field or website"),
     # a directory hosts many people: the same directory site alone is not enough
-    (("https://www.seakexperts.com/members/1", "https://www.seakexperts.com/members/2"), None, 2,
+    (("https://www.seakexperts.com/members/x", "https://www.seakexperts.com/members/y"), None, 2,
      "Kept apart: the listings share no field or website"),
     # generic words are not a field
     ((DIR_A, DIR_B), "Medical Services", 2, "Kept apart: the listings share no field or website"),
@@ -369,7 +369,7 @@ def test_listing_merge_needs_a_shared_field_or_website(sources, urls, field, gro
 
 
 @pytest.mark.parametrize("url, signals", [
-    ("https://www.averyexpertwitness.com/about", ["web_expert_witness"]),
+    ("https://www.riveraexpertwitness.example/about", ["web_expert_witness"]),
     ("https://alex-rivera-expert-witness.example/", ["web_expert_witness"]),
     ("https://riveraconsulting.example/", []),
 ])
@@ -453,7 +453,7 @@ LOOP_URL = "https://example.com/experts/alex-rivera"
 LOOP_RESULTS = [
     {"type": "text_result", "url": LOOP_URL, "title": "Alex Rivera, toxicology expert witness",
      "snippet": "SYNTHETIC-WEB-SNIPPET follow-up page about a toxicology expert in Ohio"},
-    {"type": "text_result", "url": "https://www.linkedin.com/in/alex-rivera-2", "title": "LinkedIn",
+    {"type": "text_result", "url": "https://www.linkedin.com/in/x", "title": "LinkedIn",
      "snippet": "SYNTHETIC-WEB-SNIPPET blocked"},
     {"type": "text_result", "url": "https://example.edu/faculty/rivera", "title": "Faculty page (seen)",
      "snippet": "SYNTHETIC-WEB-SNIPPET repeat"},

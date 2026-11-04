@@ -1,6 +1,6 @@
 # Expert Witness API
 
-Give it an expert's name, get back a cited dossier: testimony history, credentials and discipline, and publications. Used to vet opposing experts, or our own before retention.
+Give it an expert's name, get back a cited expert profile: court cases and testimony, licenses and discipline, the exclusion and retraction checks, publications and career. Used to vet opposing experts, or our own before retention.
 
 See [DESIGN.md](DESIGN.md) for the pipeline, the data sources and the module layout (section 9), and the root [CLAUDE.md](../CLAUDE.md) for conventions and gotchas.
 
@@ -36,9 +36,13 @@ uv run ruff check
 | POST | `/candidate-searches` | 202: starts a candidate search job |
 | GET | `/candidate-searches` | The newest 100 searches with their research runs |
 | GET | `/candidate-searches/{search_id}` | One search and its candidates |
-| GET | `/jobs/{job_id}` | Job status and steps |
+| GET | `/jobs/{job_id}` | Job status, steps and the activity log (one row per tool call) |
 | GET | `/jobs/{job_id}/events` | The run trace (poll with `after`) |
-| POST | `/research` | 202: starts a research job for a candidate (200 if one is already running) |
-| GET | `/dossiers/{dossier_id}` | The dossier |
-| GET | `/dossiers/{dossier_id}/profile` | The run's expert profile so far |
-| GET | `/dossiers/{dossier_id}/findings` | Cited findings and activity of a research run |
+| POST | `/research` | 202: starts a research job for a candidate, with an optional pasted `testimony_list` (200 if one is already queued or running) |
+| GET | `/dossiers/{dossier_id}` | The research run: ids, status and the expert's name |
+| GET | `/dossiers/{dossier_id}/profile` | The live profile so far, with each cited finding's URL and title |
+| GET | `/dossiers/{dossier_id}/findings` | The run's cited findings and gaps (409 while it runs) |
+| GET | `/dossiers/{dossier_id}/expert-profile` | The structured profile for the results page (409 while it runs) |
+| POST | `/dossiers/{dossier_id}/expert-profile/rebuild` | Runs the final profile call again for a finished run (502 if the model fails) |
+| GET | `/dossiers/{dossier_id}/photo` | The expert's photo, if one was put in the run's files folder by hand (404 if none) |
+| GET | `/dossiers/{dossier_id}/files` | The run's downloaded files and our notes on them (no bytes or text) |

@@ -56,7 +56,7 @@ COURTLISTENER_SEARCH = {"results": [opinion(2), opinion(1)]}
 WEB_RESULTS = [
     {"type": "text_result", "url": "https://example.edu/faculty/rivera", "title": "Toxicology expert witness",
      "snippet": "SYNTHETIC-WEB-SNIPPET Alex J. Rivera, professor of toxicology"},
-    {"type": "text_result", "url": "https://www.linkedin.com/in/alex-rivera", "title": "LinkedIn",
+    {"type": "text_result", "url": "https://www.linkedin.com/in/x", "title": "LinkedIn",
      "snippet": "SYNTHETIC-WEB-SNIPPET blocked"},
     {"type": "text_result", "url": "https://scholar.google.co.uk/citations?user=x", "title": "Scholar",
      "snippet": "SYNTHETIC-WEB-SNIPPET blocked"},
@@ -250,7 +250,7 @@ RESEARCH_SOURCES = {
     "websearch.search_facts": [
         {"url": "https://example.org/news/rivera", "title": "Expert testifies in example trial",
          "facts": ["Testified for the plaintiff in a 2020 example trial"], "snippet": "SYNTHETIC-WEB-SNIPPET"},
-        {"url": "https://www.linkedin.com/in/alex-rivera", "title": "LinkedIn", "facts": ["blocked"]},
+        {"url": "https://www.linkedin.com/in/x", "title": "LinkedIn", "facts": ["blocked"]},
     ],
     "openalex.author": {"id": "A0000000001", "url": "https://openalex.org/A0000000001",
                         "display_name": "Alex J. Rivera", "works_count": 3, "cited_by_count": 40, "h_index": 2,

@@ -31,7 +31,7 @@ Checked against the 8 runs in the local DB (2 experts):
 | License numbers, boards, career facts, self-reported testimony counts | `web_credential`, `web_fact`, `web_testimony`, `file_fact` | free-text sentences |
 | Business address, phone, email, career roles with years, education, fees | **only the raw CV or site text** (`files.text_path`) | raw text |
 
-Example: Karol Silva's CV text starts with the business address "204 E. 2nd Ave, Suite 241, San Mateo",
+Example: in one run, the expert's CV text starts with the business address (street, suite and city),
 but the file note and the `ask_pdf` answer both dropped it. So the final step must read the CV and site
 text itself, not just the findings.
 
@@ -141,8 +141,8 @@ interface ExpertProfileView {
 
   // Header [M]
   name: string                                // [C] candidate.display_name
-  headline: Sourced<string> | null            // "Geriatrician and internist, former hospital chief medical officer"
-  specialties: Sourced<string>[]              // "Geriatric medicine", "Internal medicine"
+  headline: Sourced<string> | null            // "Orthopedic surgeon, former hospital chief of orthopedics"
+  specialties: Sourced<string>[]              // "Orthopedic surgery", "Spine surgery"
   expertise_tags: Sourced<string>[]           // 3–8 short tags
   summary: Sourced<string> | null             // 3–5 sentences; every claim backed by refs
 
@@ -168,7 +168,7 @@ interface ExpertProfileView {
   affiliations: Section<Sourced<string>>      // hospital and academic appointments
   memberships: Section<Sourced<string>>
   fees: Section<Fee>
-  testimony_summary: Section<Sourced<string>> // self-reported: "5 depositions in the past 4 years", "both sides"
+  testimony_summary: Section<Sourced<string>> // self-reported: "12 depositions in the past 4 years", "mostly defense"
 
   // Litigation [C]
   cases: Section<Case>
@@ -203,7 +203,7 @@ interface CaseDocument {
 }
 interface RiskCheck {
   status: 'clear' | 'flagged' | 'not_checked'
-  summary: string                 // "No match in OIG LEIE" / "Arizona license 13780 listed as expired (WebMD)"
+  summary: string                 // "No match in OIG LEIE" / "Ohio license 99999 listed as expired (WebMD)"
   items: Sourced<string>[]
   checked_sources: string[]
 }

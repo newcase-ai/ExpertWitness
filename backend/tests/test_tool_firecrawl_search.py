@@ -44,7 +44,7 @@ HITS = [
     hit(SUB_SITE, description=f"{SNIPPET} expert Dr. Alex J. Rivera testified"),  # name in the snippet
     hit("https://other.example.com/rivera", title="Alex Rivera, toxicologist"),  # off the asked site
     hit("https://courts.example.gov/opinions/7", title="Rivera v. State"),  # surname only (gotcha 13)
-    hit("https://www.linkedin.com/in/alex-rivera", title="Alex Rivera"),  # gotcha 2
+    hit("https://www.linkedin.com/in/x", title="Alex Rivera"),  # gotcha 2
 ]
 
 

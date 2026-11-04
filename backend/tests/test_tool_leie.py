@@ -66,7 +66,7 @@ def test_no_matches(tool_ctx, research_sources):
 
 
 def test_source_failing_is_tool_failed(tool_ctx, research_sources):
-    """PLAN known problem: the live CSV download fails with ConnectError."""
+    """Known problem: the live CSV download fails with ConnectError."""
     research_sources({"leie.possible_matches": httpx.ConnectError("synthetic connect failure")})
     assert asyncio.run(run_tool(tool_ctx, "exclusion_check")) == {"error": TOOL_FAILED}
     assert rows(tool_ctx) == [("exclusion_check", "failed", "ConnectError")]

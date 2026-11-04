@@ -70,7 +70,7 @@ def test_second_429_and_other_errors_raise(sources):
 
 
 def test_calls_are_spaced_by_the_rate_limit(sources, monkeypatch):
-    """PLAN 3e: Crossref calls go out at most 5 per second (gotcha 7)."""
+    """Crossref calls go out at most 5 per second (gotcha 7)."""
     sources(routes=route())
     monkeypatch.setattr(http, "limiters", {"crossref": http.RateLimiter(http.RATES["crossref"])})
 

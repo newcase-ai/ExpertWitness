@@ -10,7 +10,7 @@ Verified 2026-10-28 against the official docs:
 - Rate limits (hosted): Free 10 scrapes/min, Hobby 100/min. https://docs.firecrawl.dev/rate-limits
 - Cost: 1 credit per page, +1 credit per PDF page. https://docs.firecrawl.dev/billing
 
-Rules (PLAN gotchas 2, 4, 15): only http(s) URLs; gotcha 2 sites are never fetched; no `actions`
+Rules (gotchas 2, 4, 15): only http(s) URLs; gotcha 2 sites are never fetched; no `actions`
 (no logins, forms or CAPTCHA solving); `proxy: basic` (no proxy rotation to get past bot checks);
 main content only. The markdown stays in memory: it is returned to the caller, never written to the
 URL cache or the database (only facts the caller extracts from it are stored).
@@ -63,7 +63,7 @@ def check_url(url: str) -> None:
     if not parts or parts.scheme not in ("http", "https") or not parts.hostname:
         raise SourceSkipped("only http(s) URLs are read")
     if is_blocked(url):
-        raise SourceSkipped("site is never automated (PLAN gotcha 2)")
+        raise SourceSkipped("site is never automated (gotcha 2)")
 
 
 def first_text(value: object) -> str:

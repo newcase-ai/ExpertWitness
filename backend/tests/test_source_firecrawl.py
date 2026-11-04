@@ -32,8 +32,8 @@ def test_no_key_is_skipped(sources, monkeypatch):
 
 
 @pytest.mark.parametrize("url", [
-    "https://www.linkedin.com/in/alex-rivera", "https://scholar.google.com/citations?user=x",
-    "https://www.dauberttracker.com/expert/1", "ftp://example.org/cv.pdf", "file:///etc/passwd", "not a url",
+    "https://www.linkedin.com/in/x", "https://scholar.google.com/citations?user=x",
+    "https://www.dauberttracker.com/expert/x", "ftp://example.org/cv.pdf", "file:///etc/passwd", "not a url",
 ])
 def test_blocked_or_non_http_urls_are_refused(sources, with_key, url):
     _, seen = sources()

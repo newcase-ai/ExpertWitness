@@ -20,7 +20,7 @@ from tests.fakes import NAME
     ("https://www.linkedin.com/in/x", True),
     ("https://linkedin.com/in/x", True),
     ("https://scholar.google.co.uk/citations?user=x", True),
-    ("https://brokercheck.finra.org/individual/1", True),
+    ("https://brokercheck.finra.org/individual/x", True),
     ("https://www.abms.org/verify", True),
     ("https://www.linkedin.com./in/a", True),  # trailing dot
     ("https://WWW.LinkedIn.com:443/in/a", True),  # case and port
@@ -39,7 +39,7 @@ def test_blocked_domains(url, blocked):
 
 
 @pytest.mark.parametrize("url, directory", [
-    ("https://www.seakexperts.com/members/1", True),
+    ("https://www.seakexperts.com/members/x", True),
     ("https://jurispro.com/expert/x", True),
     ("https://WWW.Experts.com./x", True),
     ("https://notexperts.com/x", False),
@@ -103,7 +103,7 @@ def test_more_titles_are_not_given_names(name):
     # QA round 3: single-person pages that must be kept
     ("https://doc.example/avery", "Top-rated neurologist Dr Alex Rivera", False),
     ("https://doc.example/avery", "Top Doctors: Alex Rivera, MD", False),
-    ("https://doc.example/avery", "Best, Robert - Forensic Engineer", False),
+    ("https://doc.example/avery", "Best, Jordan - Forensic Engineer", False),
     ("https://doc.example/avery", "The Best Expert Witness for Slip-and-Fall: Alex Rivera", False),
     ("https://doc.example/avery", "Alex Rivera | Top 1% Expert Witness", False),
     ("https://doc.example/avery", "Best Expert Witnesses in Ohio: Alex Rivera", False),  # holds the name
