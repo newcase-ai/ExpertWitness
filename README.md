@@ -1,5 +1,7 @@
 # ExpertWitness
 
+[![CI](https://github.com/newcase-ai/ExpertWitness/actions/workflows/ci.yml/badge.svg)](https://github.com/newcase-ai/ExpertWitness/actions/workflows/ci.yml)
+
 **Name in, cited expert profile out.** Search for an expert witness and pick the right person. An AI
 research agent then works through public records (court filings, publications, exclusion lists,
 licensing sites and the web) and builds a profile where every fact links to its source.
@@ -18,14 +20,14 @@ It is built for litigation teams vetting an opposing expert, or their own expert
    candidate search checks OpenAlex, CourtListener and the web, then groups the hits into distinct people,
    so two experts with the same name stay apart.
 2. **Research them.** You pick a candidate and a research job starts in the background. The research agent
-   decides what to look at next, using tools that each wrap one source. Every finding is saved with its
+   decides what to look at next, using tools for its sources and tasks. Every finding is saved with its
    source URL and when it was retrieved. The page shows each step live.
 3. **Read the profile.** When the run ends, the findings are organized into one profile:
 
 | Tab | What's in it |
 | --- | --- |
 | Overview | Summary, contact, key facts and recent cases |
-| Red flags | Things opposing counsel could use, with their sources |
+| Red flags | Things opposing counsel could use, with their sources (shown only when there are some) |
 | Cases and testimony | Federal cases that name the expert, and their role in each |
 | Background | License status, board discipline, the federal exclusion list and retracted papers |
 | Publications | Papers, citation counts and online presence |
@@ -49,11 +51,14 @@ flowchart LR
 ```
 
 - **One research agent, many tools.** The agent runs on Google ADK with Meta's Model API (through LiteLLM)
-  and chooses each next step. Each tool wraps one source and enforces that source's rules in code: rate
-  limits, banned sites, and what may be stored.
+  and chooses each next step. Each source has its own tools, which enforce that source's rules in code:
+  rate limits, banned sites, and what may be stored.
 - **A court-records helper.** Court research goes to a helper agent. It searches CourtListener, sorts out
   people with the same name, downloads the filings that may be the expert's (with OCR for scans) and records
-  a verdict for each case.
+  a verdict for each case. When a key filing is not public, it can ask to buy it from PACER (`pay_for_document`).
+  A separate payment service (`app/purchases.py`) decides from CourtListener's record of the filing, never from
+  the agent: at most $3 a filing, $10 a run, and a value check. For now this is a dry run: an approved request is
+  only recorded as "would buy" and nothing is charged.
 - **Two profiles.** A live profile updates as findings come in. At the end, one model call organizes
   everything into the profile the results page shows. A value that cites no collected finding is dropped, and
   contact details must appear in a cited source.
@@ -70,7 +75,7 @@ flowchart LR
 | [OIG LEIE](https://oig.hhs.gov/exclusions/) | The federal health-care exclusion list |
 | Meta web search, through the model API | Candidates and facts from the web |
 | [Firecrawl](https://www.firecrawl.dev/) | Reading web pages and PDFs, and site searches |
-| State licensing and court sites | Licenses and discipline; it finds each state's sites and how to search them, never behind a login |
+| State court and licensing sites | State cases, licenses and discipline; it finds each state's official sites and how to search them, never behind a login |
 
 ## Guardrails
 
@@ -81,8 +86,11 @@ These rules are enforced in code, not just in the prompt:
   is removed.
 - **Sites it never automates:** LinkedIn, Google Scholar, Daubert Tracker, TrialSmith, CPAverify, BrokerCheck,
   ABMS and DocInfo. It never logs in to scrape, bypasses a CAPTCHA or rotates IPs.
-- **No third-party text stored.** Search snippets and page text are never saved, only URLs, titles and our own
-  extracted facts.
+- **No third-party text in the results.** Findings and the profiles hold only URLs, titles and our own extracted
+  facts, never search snippets or page text. Downloaded files (CVs, court filings) stay on the server's disk in
+  `backend/data/files/` so the agent can read them. The run trace, for debugging, keeps the agent's turns and
+  tool arguments, with tool replies cut to 300 characters (`DEBUG_TRACE=1` keeps everything, for local
+  debugging only).
 - **Source limits respected.** For example, CourtListener allows 5 calls a minute, 50 an hour and 125 a day.
 - **Same-name safety.** A surname alone never counts as a match, and a case is only attached to the expert after
   a same-person verdict.
@@ -116,9 +124,9 @@ Settings in `backend/.env`:
 | `MODEL_API_KEY` | **Required.** A Meta Model API key; searches and research return 503 without it |
 | `MODEL_NAME` | Optional, default `muse-spark-1.3`. Never a `-contributor` model (Meta's terms, §6.2) |
 | `COURTLISTENER_TOKEN` | Court records ([CourtListener API](https://www.courtlistener.com/help/api/rest/)); without it, court research shows as a gap |
-| `COURTLISTENER_TOKEN_FALLBACK` | Optional. A second token, used only when the first is refused |
+| `COURTLISTENER_TOKEN_FALLBACK` | Optional. A second token, used when the first is refused (HTTP 401/403) or not set |
 | `CONTACT_EMAIL` | Sent with requests so OpenAlex and Crossref can reach you (their "polite pool") |
-| `FIRECRAWL_API_KEY` | Reading web pages and PDFs; those tools are skipped without it |
+| `FIRECRAWL_API_KEY` | Reading web pages and PDFs, site guides and Firecrawl searches; those tools are skipped without it |
 | `DATABASE_PATH` | Optional, default `backend/data/expert_witness.db` |
 | `DEBUG_TRACE` | Optional. `1` keeps the full run trace, for local debugging only |
 
@@ -145,9 +153,11 @@ backend/
   app/main.py              API routes
   app/jobs.py              background jobs: candidate search and research
   app/research_agent.py    the research agent
-  app/tools/               agent tools, one per source
+  app/tools/               agent tools, one file per source or task
   app/sources/             source clients: HTTP, rate limits, caching
+  app/profile.py           the live profile, updated while the agent works
   app/expert_profile.py    the final, structured profile
+  app/purchases.py         the dry-run payment service for court filings
   tests/                   offline tests with fakes
   DESIGN.md                the design and the tool cards
 frontend/src/

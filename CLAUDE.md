@@ -31,9 +31,12 @@ backend/
   app/research_agent.py    main research agent (step key stays "main_agent")
   app/llm.py               the only door to the model API
   app/http.py              shared httpx client, rate limits, URL cache
+  app/expert_profile.py    the final structured profile (one model call when a run ends) and its view
+  app/purchases.py         payment service for pay_for_document (dry run: nothing is bought)
+  app/pdf_text.py          PDF text layer and local OCR for court filings
   app/evidence.py, memory.py, profile.py, trace.py
   app/sources/<name>.py    raw source clients: HTTP, rate limits, cache. No agent logic.
-  app/tools/<name>.py      agent tools; each wraps a source. Registry + wrapper in tools/__init__.py
+  app/tools/<name>.py      agent tools, one file per source or task. Registry + wrapper in tools/__init__.py
   tests/                   test_source_<name>.py, test_tool_<name>.py, test_api_<area>.py,
                            otherwise test_<module>.py; fakes.py + conftest.py hold the fakes
   data/                    SQLite file, downloads, LEIE CSV (gitignored, never commit)
@@ -42,7 +45,7 @@ frontend/src/
   main.tsx                 routes
   pages/<Name>Page.tsx     one routed page per file
   components/AppHeader.tsx shared by every page
-  components/<area>/       pieces of one page/area (profile/, run/): one component per PascalCase
+  components/<area>/       pieces of one page/area (profile/, run/, search/): one component per PascalCase
                            file; a file of several small components or helpers is lowercase
                            (profile/common.tsx, profile/tabs.ts)
   components/ui/           shadcn-style primitives (kebab-case)
@@ -50,6 +53,10 @@ frontend/src/
   lib/types.ts             shared types
   lib/mocks/               mock data only (no types, no logic)
   lib/*.ts                 helpers (kebab-case)
+docs/
+  demo/                    one-file demo of the results page (fictional expert)
+  images/                  README screenshots
+  expert-profile-spec.md   the structured profile spec
 ```
 
 ## Rules for writing code here
@@ -70,9 +77,8 @@ frontend/src/
 ## Gotchas
 
 Code comments say "gotcha N"; N is the number below. Numbered, append only, one line each.
-Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were updated after the cleanup renames.
 
-1. Firecrawl terms (rev. 2026-10-07) ban "hard background check" and FCRA uses; do not use it.
+1. Firecrawl (tools 3, 6, 7) reads only professional records from official, court and publication sites.
 2. Never automate LinkedIn, Google Scholar, Daubert Tracker, TrialSmith, CPAverify, BrokerCheck, ABMS, DocInfo.
 3. FCRA: never call output a background check or consumer report; professional records only.
 4. CFAA: no logins to scrape, no CAPTCHA bypass, no IP rotation, no fake accounts.
@@ -84,7 +90,7 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 10. The AI must only summarize collected sources; a claim without a matching source is dropped.
 11. CourtListener v4 returns 401 without the token even for search and opinion reads; no token = testimony is a gap, not an error.
 12. OpenAlex keyless budget ($0.10/day, about 100 author searches) is shared by everyone on the same IP; one person is often split over several author IDs, so merge them.
-13. Court opinions often name experts by surname only ("Dr. Loftus"); never match on surname alone, and lower the identity confidence.
+13. Court opinions often name experts by surname only ("Dr. Rivera"); never match on surname alone, and lower the identity confidence.
 14. Meta `web_search` works only on the Responses API, which uses `text.format`, not `response_format` (the other endpoint's parameter does not configure structured output); web search + JSON schema in one call is undocumented, so use two calls.
 15. Meta web search snippets are third-party page text: store only the URL, title and our own extracted facts; drop results from gotcha 2 domains.
 16. ruff 0.17 flags `except Exception` (BLE001) by default; a deliberate catch-all needs `# noqa: BLE001` with a reason. The project is not installed, so pytest relies on `pythonpath = ["."]`.
@@ -94,7 +100,7 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 20. `app.candidate_agent` imports `app.sources.websearch`, so websearch can only import from `app.candidate_agent` (e.g. `copied`) inside a function, never at module top (circular import).
 21. ruff's BLE001 does not fire on an `except Exception` that re-raises; a `# noqa: BLE001` there is itself an error (RUF100).
 22. Meta `web_search` results usually have an empty snippet: a fact step that reads only results sees titles and URLs; feed it the search call's own reply text (asked to describe pages by URL), and copy-check quoted text in it.
-23. CourtListener search `absolute_url` (`/opinion/<n>/`) holds the case (cluster) id, not an opinion id; read opinion text by `opinions[].id` (cause of the empty Taylor v. Moore passages).
+23. CourtListener search `absolute_url` (`/opinion/<n>/`) holds the case (cluster) id, not an opinion id; read opinion text by `opinions[].id` (this caused empty opinion passages in a live run).
 24. Firecrawl `proxy` defaults to `auto`, which can switch to enhanced proxies to get past bot blocks; send `proxy: basic` (gotcha 4). PDFs cost +1 credit per page, so cap `parsers[].maxPages`.
 25. Firecrawl can answer 200 when the page itself failed: check `data.metadata.statusCode`, and re-check `metadata.url` (after redirects) against gotcha 2.
 26. "court" in a host also matches courtlistener.com (and news sites such as courthousenews.com): the cross-check's court-site rule excludes CourtListener; the pasted `testimony_list` lives only in the job's memory, so a job interrupted by a restart cannot be re-run with it.
@@ -121,7 +127,7 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 47. Activity rows store the first 100 chars of every string argument the model passes: no tool may take page, snippet or file text as an argument (gotcha 15).
 48. `Finding.confidence` is only `high`/`low`: tool 1's `medium` level lives in `facts.match` and is saved as `low`; `find_case` passages are search snippets, so `court_case` returns them but never stores them (gotcha 15).
 49. `ctx.add_finding` merges the same kind + URL into one finding: every LEIE row links the same OIG search page, so tool 11 adds `#possible-match-<n>` to keep each possible match its own finding.
-50. `no_secret`'s card check (13-19 digits, dashes allowed, Luhn) also hit ~1 in 9 Springer DOIs (`10.1007/s00415-019-09213-x`), not just ORCIDs and ISBN-13: all three are exempted in `memory.NOT_CARDS`; a fact dropped as "looks like a secret" is silent apart from a gap.
+50. `no_secret`'s card check (13-19 digits, dashes allowed, Luhn) also hit ~1 in 9 Springer DOIs (made-up example in their format: `10.5555/s12345-019-00009-x`), not just ORCIDs and ISBN-13: all three are exempted in `memory.NOT_CARDS`; a fact dropped as "looks like a secret" is silent apart from a gap.
 51. ruff 0.17 flags a `list[str] = []` tool default (B006) even though pyproject selects only "I": keep `= []` with `# noqa: B006` (never mutate it); ADK then declares a plain string array with `default: []`, while `list[str] | None = None` would put a null type in the schema.
 52. Firecrawl PDF `metadata.numPages` is the pages parsed (capped by `parsers[].maxPages`); the true count is `totalPages` (may be missing): tool 7 reports `totalPages` first.
 53. CourtListener storage PDFs (`storage.courtlistener.com/<filepath_local>`) need no token and are not API calls: send the token only to the API (`SEARCH`) URLs; they have their own rate limit (`courtlistener_storage`).

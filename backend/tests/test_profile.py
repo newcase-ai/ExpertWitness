@@ -103,7 +103,7 @@ def test_new_findings_shown_to_the_model_are_capped_papers_last(tool_ctx, adk_mo
 
 def test_court_cases_ruled_out_never_crowd_out_the_kept_ones(tool_ctx, adk_model):
     """One court_research saves dozens of namesakes first and the expert's cases last: the kept ones
-    must still reach the model (a live run lost Barry v. DePuy behind 59 namesakes)."""
+    must still reach the model (a live run lost the expert's own case behind 59 namesakes)."""
     def verdict(n, level):
         return tool_ctx.add_finding("court_docket", f"SYNTHETIC case {n}", f"https://example.org/d{n}",
                                     facts={"match": {"level": level, "role": "party", "reasons": ["SYNTHETIC"]}})

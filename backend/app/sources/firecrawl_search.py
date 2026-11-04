@@ -11,7 +11,7 @@ Verified 2026-10-29 against the official docs:
 - Cost: 2 credits per 10 results, rounded up (limit 10 = 2 credits); scraping results costs extra.
   https://docs.firecrawl.dev/features/search
 
-Rules (PLAN gotchas 2, 4, 15, 24, 25): search results only, never `scrapeOptions` (no pages are
+Rules (gotchas 2, 4, 15, 24, 25): search results only, never `scrapeOptions` (no pages are
 fetched, so no proxy is used at all: `proxy` exists only inside `scrapeOptions`); open-web searches
 exclude gotcha 2 sites; a 200 answer without `success: true` is a failure. Snippets are returned to
 the caller for an in-memory name check only and never stored.

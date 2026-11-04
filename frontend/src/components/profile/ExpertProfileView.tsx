@@ -46,6 +46,9 @@ export function ExpertProfileView({ demoId, p }: { demoId: string; p: ExpertProf
   return (
     <div className="min-h-screen">
       <AppHeader />
+      <p className="border-b px-4 py-2 text-center text-xs text-muted-foreground">
+        Design mockup with sample data. Real research results are under Searches.
+      </p>
       {!research.finished && (
         <div
           role="status"

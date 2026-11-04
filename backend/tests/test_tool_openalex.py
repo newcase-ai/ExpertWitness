@@ -86,9 +86,9 @@ def test_newest_ten_in_the_reply(tool_ctx, research_sources):
     assert len(json.dumps(reply)) <= RESULT_MAX
 
 
-TITLES = ["Peer presence and fatigue effects on synthetic risk choices",
-          "Caregiver supervision and synthetic playground injury rates",
-          "A synthetic review of warning label comprehension in children"]
+TITLES = ["Liver enzyme changes after exposure to the synthetic solvent XR-7",
+          "Dose timing and recovery in a synthetic Example County lead model",
+          "A synthetic review of residue limits for the fictional pesticide ZQ-4"]
 
 
 def long_work(n, title):

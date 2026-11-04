@@ -29,7 +29,7 @@ URL_SECRET = re.compile(
 LONG_NUMBER = re.compile(r"\d(?: ?\d){11,}")  # 12+ digits in a row (card numbers), spaces allowed
 DASHED_NUMBER = re.compile(r"\d(?:[ -]?\d){11,18}")  # 4111-1111-1111-1111: a card only if Luhn-valid
 # Never card numbers: ORCID ids (0000-0002-1825-0097, about 1 in 10 passes Luhn by chance), ISBN-13 and
-# DOIs (10.1007/s00415-019-09213-x: about 1 in 9 Springer DOIs passes Luhn).
+# DOIs (Springer-style 10.5555/s12345-019-00009-x: about 1 in 9 Springer DOIs passes Luhn).
 NOT_CARDS = re.compile(r"(?<![\d-])000[09]-\d{4}-\d{4}-\d{3}[\dX](?![\w-])"
                        r"|(?<![\d-])97[89](?:-?\d){10}(?![\w-])"
                        r"|\b10\.\d{4,9}/\S+")

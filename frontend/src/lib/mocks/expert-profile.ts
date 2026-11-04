@@ -121,7 +121,7 @@ const ALVAREZ_CASES: ExpertCase[] = [
   },
   {
     year: 2019,
-    name: 'Arizona v. Benally',
+    name: 'Arizona v. Doe',
     description: 'Vehicular manslaughter; prosecution expert report cited.',
     court: 'Ariz. Ct. App.',
     side: 'unknown',
@@ -346,7 +346,7 @@ export const DEMO_PROFILES: Record<string, ExpertProfile> = {
     highlights: [
       { label: 'Experience', value: '22 years in collision reconstruction' },
       { label: 'Licensed', value: 'Professional Engineer, AZ and NV' },
-      { label: 'Accreditation', value: 'ACTAR #2291' },
+      { label: 'Accreditation', value: 'ACTAR accredited' },
       { label: 'Has testified in', value: 'AZ, NV, NM and TX courts' },
       { label: 'Work split (per CV)', value: 'About 50% plaintiff, 50% defense' },
     ],
@@ -496,7 +496,7 @@ export const DEMO_PROFILES: Record<string, ExpertProfile> = {
       { title: 'Accredited Traffic Accident Reconstructionist', detail: 'ACTAR' },
     ],
     professional: [
-      { label: 'Licenses & certifications', value: 'Professional Engineer (AZ, NV) · ACTAR #2291' },
+      { label: 'Licenses & certifications', value: 'Professional Engineer (AZ, NV) · ACTAR accredited' },
       { label: 'Affiliations', value: 'Sonoran State University' },
       {
         label: 'Memberships & associations',

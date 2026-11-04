@@ -210,7 +210,7 @@ def test_opinion_without_name_or_text_gives_no_passages(sources):
 
 
 def test_opinion_passages_middle_initial_optional(sources):
-    """PLAN 3l: "Morgan Q. Example" is named "Dr. Morgan Example" or "Morgan Quinn Example"."""
+    """Middle initial optional: "Morgan Q. Example" is named "Dr. Morgan Example" or "Morgan Quinn Example"."""
     text = (FILLER + "The plaintiff called Dr. Morgan Example, a neurologist. " + FILLER
             + "Morgan Quinn Example then testified. " + FILLER + "Dr. Example said more. " + FILLER
             + "Morgan Z. Example is someone else. " + FILLER)
@@ -313,7 +313,7 @@ def test_case_name_query_entities_and_fallback():
     q = courtlistener.case_name_query
     assert q("Quinn Harlow, MD vs. Northwind Lifestyles, Inc., ZZQ Management, Ltd.") == \
         'caseName:("Harlow" AND "Northwind Lifestyles")'
-    assert q("Ada Lyle, Ben Orr, and Cy Pratt, et al. v. City of Brookfield") == 'caseName:("Lyle" AND "Brookfield")'
+    assert q("Ada Lyle, Ben Sample, and Cy Pratt, et al. v. City of Brookfield") == 'caseName:("Lyle" AND "Brookfield")'
     assert q('Dee (Dr. "Ann") Roe versus Acme* Corp.') == 'caseName:("Roe" AND "Acme")'
     assert q('In re "Estate" of (Lyle)') == 'caseName:"In re Estate of Lyle"'  # no "v.": phrase as before
 

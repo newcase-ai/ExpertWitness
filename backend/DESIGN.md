@@ -1,33 +1,52 @@
-# Expert Witness Research API: Design (Milestone 1)
+# Expert Witness Research API: Design
 
-Status: draft for the user's review, 2026-10-28. No code yet.
-Read with the team's private notes `PLAN.md` (goal, rules, gotchas) and `SOURCES_AND_FLOW.md`
-(sources and legal rules); both are kept out of git. The numbered gotchas are copied into the root `CLAUDE.md`.
+Status: built (first draft 2026-10-28). Section 1 is the current flow, 4B the research agent with one
+card per tool (4B.9), and 9 the module map. Sections 2-4A are the first design (M1-M6): 4.1 and 4A
+still describe the candidate search; parts later replaced are marked.
+The numbered gotchas are in the root `CLAUDE.md`.
 Every outside fact has a link. "Not verified" means we could not confirm it on an official page.
 JSON examples use a made-up person ("Alex Rivera") and placeholder ids; they are not sources.
 
 ## 1. Flow overview
 
+The flow as built (checked against the code on 2026-11-04).
+
 1. The user types a name (plus optional hints: field, location, employer).
-2. **Candidate search** (a short job): OpenAlex, CourtListener and Meta's built-in web search are
-   searched in parallel, then the AI groups the hits into distinct people. Each person is saved
+2. **Candidate search** (a short job, 4.1 and 4A): code searches OpenAlex, CourtListener opinions and
+   Meta's built-in web search in parallel, a small follow-up agent may search again, then one AI call
+   groups the hits into distinct people. Code checks every merge and ranks them. Each person is saved
    in SQLite with a stable `candidate_id`.
-3. The user picks one candidate.
-4. **Research job**: three collectors run in parallel (testimony, publications, credentials).
-   Each finding is saved with its source URL and retrieval time.
-5. **Dossier writer**: the AI turns the findings into a cited dossier. Code removes any claim that
-   cites a source we did not collect. The frontend polls `GET /jobs/{id}` and then reads the dossier.
+3. The user picks one candidate (`POST /research`, optionally with a pasted case list that is never
+   stored, except in a `DEBUG_TRACE=1` trace).
+4. **Research job** (4B): one ADK agent, the main agent (`app/research_agent.py`), picks each next step
+   from its tools (4B.9) until it replies DONE or hits the time or step limit (`RESEARCH_SECONDS`,
+   `MAX_AGENT_CALLS`); each tool also has a cap per run. Every call goes through one wrapper
+   (`app/tools/__init__.py`: caps, clock, banned sites, activity row, trace). Tools save findings with
+   their source URL and retrieval time, gaps and downloaded files. `court_research` hands court records
+   to a helper agent: it searches CourtListener's RECAP archive, sorts out people with the same name,
+   reads filings (OCR for scans), records a verdict per case, and may ask `pay_for_document` for a
+   filing that is not public (a dry run decided by `app/purchases.py`: nothing is bought).
+5. **Live profile** (`app/profile.py`): after each tool call that saved findings, one AI call merges them
+   into the run's profile; items that cite no finding are dropped. The agent reads it with `read_profile`.
+6. **Structured profile** (`app/expert_profile.py`): when the agent stops, one AI call organizes the
+   findings and the text of CV and practice-site files into the results page's fields. Code drops any
+   value that cites nothing the run collected, and contact details not written in a cited source; cases,
+   filings, publications and the exclusion and retraction checks are built by code from findings.
+7. The frontend polls `GET /jobs/{id}`, `GET /jobs/{id}/events` and the live profile while the job runs,
+   then reads `GET /dossiers/{id}/expert-profile`.
 
 ```mermaid
 flowchart LR
-  N[Name] --> CS[Candidate search job]
-  CS --> C[Candidates in SQLite]
-  C -->|user picks one| R[Research job]
-  R --> T[Testimony: CourtListener]
-  R --> P[Publications: OpenAlex + Crossref]
-  R --> K[Credentials: OIG LEIE + web search]
-  T & P & K --> W[Dossier writer + citation filter]
-  W --> D[Dossier in SQLite]
+  N["Name + hints"] --> CS["Candidate search job<br/>OpenAlex, CourtListener, web search,<br/>follow-up agent, grouping call"]
+  CS --> C["Candidates in SQLite"]
+  C -->|"user picks one"| A["Research job: main agent<br/>app/research_agent.py"]
+  A -->|"tool calls through the wrapper"| T["Tools<br/>app/tools/"]
+  T -->|"court_research"| H["Court-records helper<br/>search, filings, OCR, verdicts,<br/>pay_for_document (dry run)"]
+  T --> F[("Findings, gaps, files<br/>each with its source URL")]
+  H --> F
+  F --> L["Live profile<br/>app/profile.py"]
+  L -->|"read_profile"| A
+  F --> P["Structured profile<br/>app/expert_profile.py<br/>uncited values dropped"]
 ```
 
 ## 2. API contract (1a)
@@ -49,6 +68,10 @@ and the finished result is stored so `candidate_id`s are stable.
 | POST | `/research` | Start a research job for one candidate |
 | GET | `/jobs/{job_id}` | Job status and per-step progress (both job kinds) |
 | GET | `/dossiers/{dossier_id}` | Read the finished dossier |
+
+Routes added since M1 (full list: `backend/README.md`): `GET /candidate-searches`,
+`GET /jobs/{job_id}/events` (4B.6b), `GET /dossiers/{dossier_id}/findings` (M3), `/profile`,
+`/expert-profile`, `POST /dossiers/{dossier_id}/expert-profile/rebuild`, `/photo` and `/files`.
 
 ### GET /health
 200 `{"status": "ok"}`. No errors.
@@ -133,9 +156,9 @@ Part 2 change (M7): every job also returns an `activity` list, and the research 
 step row (`main_agent`). See 4B.6.
 
 ### GET /dossiers/{dossier_id}
-200: the dossier (section 3). 404 `{"detail": "dossier not found"}`. 409 while the job is not
-done, same error shape: `{"detail": "dossier not ready: job job_02 is running"}` (or
-`"... job job_02 failed"`). The frontend already has the `job_id` from `POST /research`.
+200: the research run, `{"dossier_id", "candidate_id", "job_id", "status", "display_name"}`, so a page can
+follow a run after a reload. 404 `{"detail": "dossier not found"}`. No 409: the dossier of section 3 was
+never built; the results page reads `GET /dossiers/{dossier_id}/expert-profile` (409 while the job runs).
 
 ### GET /dossiers/{dossier_id}/findings
 Added in M3. The raw findings the collectors saved, before any AI writing:
@@ -174,7 +197,7 @@ job is not done: `{"detail": "findings not ready: job job_02 is running"}`.
   expert-directory domain), `web_expert_witness` (a web result whose title or URL contains the whole
   word "expert" or "experts", e.g. "expert witness", "expert-witness", "expert_witness"; not
   "expertise", "inexpert", "expertly", or whose domain contains "expertwitness"/"expert-witness",
-  e.g. averyexpertwitness.com). Signals come from source data only: AI-written text never earns
+  e.g. riveraexpertwitness.example). Signals come from source data only: AI-written text never earns
   one, and being returned by the expert query alone is not enough.
 - `location` is AI-written text. Code compares only the US state at its end (a full state name or
   a 2-letter code, e.g. "Gilbert, Arizona", "Concord, MA"; "Washington, DC" is DC, its own place).
@@ -185,6 +208,11 @@ job is not done: `{"detail": "findings not ready: job job_02 is running"}`.
   `false`, `[]` and the fixed note `"No expert-witness evidence found"`.
 
 ### Dossier
+
+> Not built: replaced by the live profile (`app/profile.py`, `GET /dossiers/{id}/profile`) and the
+> structured profile (`app/expert_profile.py`, `GET /dossiers/{id}/expert-profile`; shape in the root
+> `docs/expert-profile-spec.md`). Kept as the M1 design.
+
 ```json
 {
   "dossier_id": "dos_01", "candidate_id": "cand_01", "job_id": "job_02",
@@ -264,7 +292,7 @@ file is gitignored (gotcha 8).
      [author search](https://help.openalex.org/api-entities/authors/search-authors)).
      Keep only authors whose name or alternative names contain the given and family name
      (search covers `display_name_alternatives`; a live "John Smith" search on 2026-10-28 ranked
-     "Wilson Glenn McCluggage" third).
+     an author whose display name has neither "John" nor "Smith" third).
   2. CourtListener `GET https://www.courtlistener.com/api/rest/v4/search/?type=o&highlight=on&q=("<First M. Last>" OR "<First Last>") AND ("<First Last> expert"~5 OR "<First Last> experts"~5 OR "<First Last> Daubert"~5)`
      ([search API](https://wiki.free.law/c/courtlistener/help/api/rest/v4/search)). The name must sit
      within 5 words of an expert-role word, so a party or judge with the name does not count;
@@ -343,7 +371,7 @@ file is gitignored (gotcha 8).
      search results only; we never fetch them.
 - Merging split OpenAlex ids (gotcha 12): code accepts a merge the AI proposes only if (a) the
   ids share an ORCID, or (b) the names have the same given and family name in any order, ignoring
-  middle initials (e.g. "Bennet I. Omalu" and "Omalu Bennet"). A merge by (b) is written in
+  middle initials (e.g. "Alex J. Rivera" and "Rivera Alex"). A merge by (b) is written in
   `match_notes` as "merged by name only", and identity confidence cannot be `high` on it alone.
   OpenAlex ids the rule keeps apart are left out of the candidate (noted in `match_notes`).
 - Output: candidates (section 3), plus `failed_sources`.
@@ -388,14 +416,13 @@ file is gitignored (gotcha 8).
   2. OpenAlex works per id: `GET https://api.openalex.org/works?filter=author.id:<id>&sort=publication_year:desc&per_page=100`,
      first page only; reads `is_retracted`. Filter calls cost $0.0001 each.
   3. Retraction check **by DOI, not by name**. A name search can miss retracted works: a
-     `query.author` search for Andrew Wakefield did not return his retracted Lancet paper in its
+     `query.author` search for one author did not return their retracted paper in its
      first 50 results (QA, 2026-10-28). So for each DOI from step 2, code calls the Crossref
      single-record endpoint `GET https://api.crossref.org/works/<doi>`, plus `mailto=<CONTACT_EMAIL>`
      only if set ([REST API](https://www.crossref.org/documentation/retrieve-metadata/rest-api/)).
      A work is retracted when `updated-by[].type == "retraction"`. No Crossref doc page states
-     this; it is seen live (2026-10-28) on the retracted Wakefield paper's record, which carries
-     `updated-by` with `type: "retraction"`, `source: "retraction-watch"`
-     ([record](https://api.crossref.org/works/10.1016/S0140-6736(97)11096-0)).
+     this; it is seen live (2026-10-28) on that retracted paper's record, which carries
+     `updated-by` with `type: "retraction"`, `source: "retraction-watch"`.
      A work is also flagged if OpenAlex says `is_retracted: true`. Works with no DOI are checked
      by OpenAlex's flag only, and this is listed as a gap.
 - Output findings: works (title, year, venue, DOI, OpenAlex/DOI URL), stats, retraction flags with date and source.
@@ -421,20 +448,25 @@ file is gitignored (gotcha 8).
   pulls facts (kind, text, result number) only from the returned results. Code keeps a fact only
   if its result number exists, then stores the result's URL, title and the fact. Results from
   blocked domains (gotcha 2) are dropped.
-- **We never fetch licence or board pages (or any other web page) ourselves.** State boards are
-  "Check each board" in `SOURCES_AND_FLOW.md`, so automated access is not cleared. A licence or
-  board result is shown as "verify manually at <board URL>", never as a confirmed status.
+- **In this M1 design we never fetched licence or board pages (or any other web page) ourselves.**
+  A licence or board result was shown as "verify manually at <board URL>", never as a confirmed
+  status. Tools 3, 6 and 7 now read official state sites, never behind a login, paywall or robot
+  check (section 7).
 - Output findings: licence and board results (to verify manually), discipline items, exclusions;
   each with URL, title and retrieval time.
 - Gap: no web results; LEIE file not downloadable; field not health-related (LEIE still runs, a
   hit is shown only as a possible match).
 - Rate limits: Meta 3,000 RPM per team ([pricing and limits](https://dev.meta.ai/docs/pricing-rate-limits)).
-- Every source this design calls is marked automated use "Yes" in `SOURCES_AND_FLOW.md`:
+- Every source this design calls is cleared for automated use:
   CourtListener, OpenAlex, Crossref, Retraction Watch via Crossref, OIG LEIE, Meta web search.
   The OIG Online Search is only linked for the user, never called.
 
 ### 4.5 Dossier writer
-- M6 builds this on the ADK layer (4A.3); the code checks below stay.
+
+> Not built: replaced by the structured profile (`app/expert_profile.py`), made by one model call
+> when the research agent stops (`jobs.build_expert_profile`). Its code checks: values that cite
+> nothing the run collected are dropped, and contact details must be written in a cited source.
+> The list below is the M6 plan.
 - Input: candidate, all findings, the `sources` list (ids `s1..sn`, built by code from findings).
 - AI: one Responses call with `text.format` JSON schema (no web search), streamed. Instructions:
   use only the findings; cite source ids on every item; no private traits, no character
@@ -455,7 +487,7 @@ file is gitignored (gotcha 8).
 
 ## 4A. ADK architecture (M4 design, built in M5-M6)
 
-> Part 2 (research job): replaced by 4B (approved 2026-10-29; old research code removed in M8). Part 1 still follows 4A.
+> Part 2 (research job): replaced by 4B (approved 2026-10-29; old research code removed in M8). Part 1 still follows 4A. `app/agents.py` is now `app/candidate_agent.py`.
 
 Decided 2026-10-29: agents run on Google ADK (`google-adk` 2.13.0) with its LiteLlm adapter
 (`litellm` 1.106.6) to the Meta Model API; A2A is out of scope. This section sets *how agents run*;
@@ -619,7 +651,7 @@ Read-only in M5: the other `app/sources/` modules, `app/http.py`, `app/models.py
 ## 4B. Main agent framework (part 2; M6 design, built in M7-M8)
 
 Status: approved by the user, 2026-10-29. Replaces 4.2-4.4 and 4A for part 2 (the research
-job, after the user picks a candidate). Part 1 (candidate search, 4.1, `app/agents.py`) is unchanged.
+job, after the user picks a candidate). Part 1 (candidate search, 4.1, `app/candidate_agent.py`) is unchanged.
 **Engineers building a tool: read 4B.1-4B.8 once, then your card in 4B.9.**
 
 ### 4B.1 The idea
@@ -630,7 +662,7 @@ through one **wrapper** (caps, clock, banned sites, errors, activity log), so a 
 only the tool's own logic.
 
 ```
-POST /research -> job -> main agent (ADK loop, 10 min, 40 model calls)
+POST /research -> job -> main agent (ADK loop, 4 h, 1,000 model calls)
                            | calls a tool by name
                            v
                   wrapper (app/tools/__init__.py): args, cap, clock, never raises, activity row
@@ -694,6 +726,7 @@ What the wrapper does with each call:
 | Cap used up, or no time left | `LIMIT_REACHED` | `refused` | no |
 | Tool returns `refuse(text)` | `{"error": text}` | `refused` | yes |
 | Tool raises `SourceSkipped(text)` | `{"error": "source not available: <text>"}` | `skipped` (+ gap) | yes |
+| Tool raises `SourceFailed(text)` | `{"error": "source call failed: <text>"}` (fixed text: what happened, whether to call again) | `failed` (+ gap with the text) | yes |
 | Tool raises anything else | `TOOL_FAILED` | `failed` (+ gap, exception type only) | yes |
 | Job deadline reached during the call | `LIMIT_REACHED` | `failed` ("time limit") | yes |
 | Reply longer than `RESULT_MAX` | `{"error": "tool reply too long"}` | `failed` | yes |
@@ -703,22 +736,22 @@ What the wrapper does with each call:
 (`Run`) are reused from `app/evidence.py`.
 
 ### 4B.3 `Ctx`: what a tool gets
-One `Ctx` per research job, made by `app/main_agent.py`.
+One `Ctx` per research job, made by `app/research_agent.py`.
 
 | Member | What it does |
 | --- | --- |
 | `ctx.expert` | The picked `Candidate`: `display_name`, `field`, `location`, `affiliations`, `identifiers`, `evidence`. |
 | `ctx.job_id`, `ctx.dossier_id` | Ids of this run. |
-| `ctx.time_left()` | Seconds left before the 10-minute deadline. |
+| `ctx.time_left()` | Seconds left before the run's deadline (`RESEARCH_SECONDS`, 4 h). |
 | `ctx.add_finding(kind, title, url, facts=None, confidence="low", note=None) -> ref` | Saves one finding to the profile at once (survives a crash) and returns its `finding_id`. URL must be http(s) and not a gotcha 2 domain; title cut to 200 chars; `facts` at most 4,000 chars as JSON. Same `kind` + URL again returns the existing ref. `collector` is set to the tool's name by the wrapper. |
 | `ctx.add_gap(reason)` | Saves a gap (`step` = tool name). Fixed or code-made text only. |
 | `ctx.findings(kind=None) -> list[Finding]` | The profile so far, for this dossier. |
 | `ctx.fetch_ok(url) -> str \| None` | `None` if the tool may fetch the URL; otherwise a fixed refusal text: not http(s), gotcha 2 domain, an API source host (gotcha 40), or listed in `blocked_sites`. Call it before any fetch of a model-given URL. |
-| `ctx.save_file(url, data, mime, text=None) -> file_id` | Stores downloaded bytes in `data/files/<dossier_id>/<file_id>.<ext>` and, if given, a text version (`<file_id>.md`) for tools 4, 5, 8. Checks `fetch_ok(url)`, at most 20 MB per file, 30 files per job. Adds a `files` row. |
+| `ctx.save_file(url, data, mime, text=None) -> file_id` | Stores downloaded bytes in `data/files/<dossier_id>/<file_id>.<ext>` and, if given, a text version (`<file_id>.md`). Checks `fetch_ok(url)`, at most 20 MB per file (`FILE_MAX`; no per-job file count). Adds a `files` row. Court filings use `ctx.keep_file` instead (no size cap; API hosts allowed, gotcha 58). |
 | `ctx.file_text(file_id, max_chars=60_000) -> str` | The text version of a saved file ("" if none). Only for files of this dossier. |
 | `await ctx.ask_model(instructions, input, schema=None)` | One model call (`llm.call_model`). Every string in the answer that copies 40+ characters from `input` is dropped, and strings are cut to 500 chars (or the schema's `maxLength`). Use it for any model-written text that will be stored. |
 | `await ctx.sub_agent(instructions, prompt, tools=[...], max_llm_calls=6, role="helper")` | A small ADK agent (`llm.make_agent` + `llm.run_agent`), named `<tool>_<role>`, for tools that are agents. `tools` are names of registered tools (also `@tool(..., main=False)` ones, which only helpers get); their calls go through the same wrapper, caps and activity log, but leave the automatic profile update to the calling tool's own call. Timeout = time left. Returns `AgentRun`. |
-| `await ctx.call_tool(tool_name, **args) -> dict` | Calls another registered tool through the wrapper (example: tool 8 calls `ask_pdf`). |
+| `await ctx.call_tool(tool_name, **args) -> dict` | Calls another registered tool through the wrapper (helper agents' tool calls go through it too). |
 | `ctx.log(text)` | Sets this call's activity `detail` (cut to 200 chars). Code-made text only: counts, reasons. Never page, snippet or model text. |
 
 Long-term memories (site manuals, state sites, blocked sites) are plain functions in `app/memory.py`
@@ -762,26 +795,31 @@ are never put in findings, never in API responses, never committed (gotcha 8). M
 snippets are still never stored (gotcha 15).
 
 ### 4B.5 The main agent and the job
-- `app/main_agent.py`: `async def research(job_id, dossier_id, expert, testimony_list=None)`. Builds
-  `Ctx` and `Run` (`seconds=RESEARCH_SECONDS`, caps from the registry), wraps every registered tool,
-  makes one agent (`llm.make_agent("main_agent", INSTRUCTIONS, tools=...)`) and runs it with
+- `app/research_agent.py`: `async def research(job_id, dossier_id, expert, testimony_list=None)`. Builds
+  `Ctx` and `Run` (`seconds=RESEARCH_SECONDS`, each registry cap times `TOOL_CAP_SCALE`), wraps every
+  main tool, makes one agent (`llm.make_agent("main_agent", INSTRUCTIONS, tools=...)`) and runs it with
   `llm.run_agent(max_llm_calls=MAX_AGENT_CALLS, timeout=time left)`. Its final text is thrown away;
   only what tools saved counts.
-- Config (`app/config.py`): `RESEARCH_SECONDS = 600` (decision 8), `MAX_AGENT_CALLS = 40`. Starting
-  values, tuned in the live runs.
+- Config (`app/config.py`), tuned in the live runs (they started at 600 s and 40 calls):
+  `RESEARCH_SECONDS = 4 * 60 * 60` (4 h), `MAX_AGENT_CALLS = 1_000`, `TOOL_CAP_SCALE = 10` (a run may
+  call each tool 10 times its card's cap).
 - First message to the agent: the expert block (name, field, location, affiliations, ids, and the
   titles + URLs of the candidate's evidence), the cases from the pasted `testimony_list` (in memory
   only, never stored, as today), and the tool list. Long-term memories are not pasted in; tools read them.
 - Instructions, in short: "Research this one expert's professional record: testimony, court rulings
-  about them, publications, retractions, licences and discipline. Use only tools. Start with court
-  records, publications, the retraction check, the exclusion check and web search, then follow leads
-  (a case on a CV, a state court site, a file worth reading). Professional records only: never private
-  life, family, home address or health. Never log in, never get past a robot check or a paywall.
-  Reply DONE when nothing new is likely."
+  about them, publications, retractions, licences and discipline. Use only tools. Start with
+  publications, the exclusion check and web search, then federal court records (`court_research`)
+  and the retraction check, then follow leads (a case on a CV, a state court site, a file worth
+  reading), reading the profile (`read_profile`) before choosing what to search next. Professional
+  records only: never private life, family, home address or health. Reply DONE when nothing new is
+  likely." Logins, robot checks and paywalls are refused by the tools, not the prompt (tools 3 and 7
+  block such sites, gotcha 4).
 - Job end: DONE, `step_limit` or `time_limit` -> job `done` (the step detail says which). A
   `ModelError` -> step `failed` + gap; the job is `failed` only if no tool call finished, otherwise
   `done` with what was saved. A crash outside the agent fails the job, as today.
 - `jobs.RESEARCH_STEPS` becomes one row: `("main_agent", "Research agent")`.
+- After the agent stops, `jobs.build_expert_profile` builds the structured profile (`app/expert_profile.py`)
+  when the run saved findings; a failure there is a gap and the job still ends `done`.
 
 ### 4B.6 Activity log and the GET /jobs/{id} change (6c; for the frontend team)
 Every job response gains an `activity` list (always `[]` for candidate searches). The research job
@@ -809,7 +847,7 @@ has one step row instead of nine. Example (made-up values):
   list comes back on every poll.
 - `label` is the tool's fixed label; `detail` is code-made text; `args` are the model's arguments
   after checking, string values cut to 100 chars.
-- When done, the step detail says why it stopped ("agent finished", "time limit (10 min)", "step
+- When done, the step detail says why it stopped ("agent finished", "time limit (240 min)", "step
   limit"). `result` stays `{"kind": "dossier", "id": ...}`; GET /dossiers/{id}/findings keeps working.
 - Findings change (see 4B.11 D2): `collector` holds the tool name; `kind` is an open string (the
   current kinds stay for tools 1, 9-12; new kinds are listed on each card).
@@ -821,14 +859,16 @@ Every research job also records an ordered **trace** (`app/trace.py`, table `eve
 caps, tools, instructions, first message), `model_turn` (agent, text, reasoning, tool calls asked for
 with their arguments, tokens), `tool_start` / `tool_end` (full checked arguments; status, detail,
 duration, reply, reply size, error type and message), `tool_error` (an error reply the model got,
-also ADK's own refusals such as a missing argument), `finding`, `gap`, `run_end` (why it stopped, model
-turns, token totals, error). `tool_seq` links an event to the tool call it happened inside (model
-calls inside tools, the profile update, tools calling tools).
+also ADK's own refusals such as a missing argument), `finding`, `gap`, `purchase` (each
+`pay_for_document` decision, tool 13), `court_file` (local OCR of a scanned filing), `run_end` (why it
+stopped, model turns, token totals, error). `tool_seq` links an event to the tool call it happened
+inside (model calls inside tools, the profile update, tools calling tools).
 - Content rules: secrets are always `[hidden]` (gotcha 45). Default (safe): tool replies and model text
   inside tools are cut to 300 characters plus their size (gotcha 15); the pasted testimony list is not
   stored; errors keep type and message. `DEBUG_TRACE=1` keeps everything in full, tracebacks too: local
   testing only, never on a shared server. Each event says `debug: true|false`.
-- The research page (`/research/:dossierId`) shows it live: Timeline, Results, Raw log (download JSON).
+- The research page (`/research/:dossierId`) shows the profile; its Debug switch (`?debug=1`) shows the
+  trace live: Timeline, Results, Raw log (download JSON).
 - `GET /jobs/{id}`, the activity rows and `GET /dossiers/{id}/findings` are unchanged.
 
 ### 4B.7 What stays in code (6d)
@@ -870,8 +910,9 @@ synthetic), 15 (no snippet or page text stored). Caps are per job, starting valu
 
 **Tool 1: court records (core, M7; agent-driven since 2026-11-02).** File `app/tools/courtlistener.py`.
 The main agent calls `court_research`; a court-records helper (`ctx.sub_agent`, user decision
-2026-11-02) does the CourtListener work with four helper-only tools (`@tool(main=False)`) plus
-`ask_pdf`: it searches, sorts out people with the same name, reads filings and decides itself
+2026-11-02) does the CourtListener work with five helper-only tools (`@tool(main=False)`: `court_search`,
+`court_filings`, `court_file`, `court_verdict` and `pay_for_document`, tool 13) plus `ask_pdf`: it
+searches, sorts out people with the same name, reads filings and decides itself
 whether a case is the expert's (no code drop or score; the old `court_records`, `court_case` and
 the automatic filing check are gone). Cases and filings shown to the helper are kept in `Run.cases`
 / `Run.filings`, so later calls take their ids.
@@ -894,7 +935,7 @@ the automatic filing check are gone). Cases and filings shown to the helper are 
   (gotcha 13), AND the agent's `words` (field, group and wildcard syntax removed) and the case name's
   party key words (`case_name_query`), each at most 200 characters. Words only filter the name-only
   results (every word must appear), so the helper reads every page of the plain search and narrows
-  only when `total` is over 100 (Peter Crosby: 27 cases in all; ten word searches found only cases
+  only when `total` is over 100 (in one live run: 27 cases in all; ten word searches found only cases
   already among them). Reply: `total`, `cases` cut to fit `RESULT_MAX`, `more`; `more=true` shows the
   rest of the page from `Run.searches` (no call), then the next page via the `next` link (one call,
   checked to stay on the API). Each case: docket_id, case name, court, docket number, date filed,
@@ -951,19 +992,24 @@ the automatic filing check are gone). Cases and filings shown to the helper are 
 `site_guide(domain: str, state: str = "")`, label "Site guide", cap 4. With a `state`, an official
 site it read is added to that state's sites (tool 2's memory, `notes` `learned: site_guide`).
 - Purpose: learn how to search one website and remember it (memory 2).
-- Reads `memory.manual(domain)`; if missing, reads up to 3 pages of the site (Firecrawl
-  `scrape`, after `ctx.fetch_ok`), then `ctx.ask_model` writes `how_to` (search URL pattern,
-  fields, result format, JavaScript needed). Saves `memory.save_manual`. A site that asks for a
-  login, a payment or a robot check -> `memory.block_site(domain, reason, url)`.
+- Reads `memory.manual(domain)` and up to 3 pages of the site: the home page, then useful links, ones
+  not read before first (Firecrawl `scrape`, after `ctx.fetch_ok`), plus their HTML (tool 7's checked
+  fetch) to find GET search forms. The manual is JSON in `how_to`: URL templates (e.g.
+  `.../search?query={query}`) that code builds from a real link or form it read (the model only names
+  the link or form and explains its parts), what results pages show, and `not_usable` searches (POST
+  forms, scripts). Each call merges into the saved manual (`memory.save_manual`). A site that asks for
+  a login, a payment or a robot check -> `memory.block_site(domain, reason, url)`.
 - **Logins: the decision belongs to this tool's engineer, after a legal check per site (gotcha 4, the
-  CFAA row in SOURCES_AND_FLOW).** Until then: no logins, `login_notes` holds only "login needed: yes/no,
+  CFAA).** Until then: no logins, `login_notes` holds only "login needed: yes/no,
   where", never a credential (gotcha 45; `no_secret` enforces it).
-- Reply: `{"domain", "how_to", "login_needed": bool, "blocked": reason|null, "from_memory": bool}`.
+- Reply: `{"domain", "manual", "login_needed": bool, "blocked": reason|null, "from_memory": bool, "added": int}`
+  (`added` = new templates; `domain` is the site it redirected to, if any).
 - Done when: manual saved and reused (test); a fake captcha page blocks the domain (test); a secret
   in `login_notes` is refused (test).
 
 **Tool 4: ask a PDF (engineer, T4).** File `app/tools/ask_pdf.py`.
-`ask_pdf(file_id: str, question: str)`, label "Ask a file", cap 10.
+`ask_pdf(file_id: str, page_start: int, page_end: int, question: str, context: str = "")`,
+label "Ask a file", cap 10. PDFs only.
 - Purpose: answer one question from one saved file (memory 5).
 - Uses `ctx.file_text(file_id)` (the text version tool 7 saved) and `ctx.ask_model` (answer at most
   1,000 chars, copy-checked, so no long verbatim quotes). If the answer is a fact about the expert,
@@ -978,7 +1024,8 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
   line whole (`FACT_LINE_MAX`), not cut to `LINE_MAX`.
 - Reading PDFs without a text version: the engineer's choice; a new dependency (e.g. `pypdf`) needs
   the lead's OK.
-- Reply: `{"answer", "ref": ref|null}`; unknown or other dossier's `file_id` -> `refuse("unknown file")`.
+- Reply: `{"answer", "ref": ref|null, "pages", "page_count"}`; an unknown or other dossier's `file_id` is
+  refused, listing this expert's file_ids.
 - Done when: answer + finding from a test file; copied text dropped (test); unknown file refused (test).
 
 **Tool 5: file note (engineer, T5).** File `app/tools/note_file.py`.
@@ -994,11 +1041,15 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 `firecrawl_search(query: str, sites: list[str] = [])`, label "Search the web or chosen sites", cap 8.
 - Purpose: search for the expert, a case number, a state or another clue, either on the whole web
   (`sites` empty) or only on up to 5 given sites (e.g. a state court site from tool 2); return hits with URLs.
-- Method: Firecrawl's search API (a search engine query with `site:` filters), never the sites themselves
-  and never scraping the result pages (credits). The call lives in `app/sources/firecrawl_search.py`.
-  Each site is checked with `ctx.fetch_ok` first (banned, API hosts like courtlistener.com, blocked-sites
-  memory -> refused); a hit whose host is not one of the asked sites, or fails `ctx.fetch_ok`, is dropped.
-  Site manuals (memory 2) are not used until tool 3 exists.
+- Method: Firecrawl's search API (a search engine query with `site:` filters); result pages are never
+  scraped (credits). The call lives in `app/sources/firecrawl_search.py`. Each site is checked with
+  `ctx.fetch_ok` first (banned, API hosts like courtlistener.com, blocked-sites memory -> refused); a hit
+  whose host is not one of the asked sites, or fails `ctx.fetch_ok`, is dropped.
+- A site with a saved manual (tool 3) is searched through its own search page instead: one model call
+  picks a URL template and its values, code fills it in (values URL-encoded) and reads the results page
+  with `read_web_page`; links on a results line naming the expert in full become hits. Any problem falls
+  back to the search engine. When a manual was used, the reply adds `searched` (per site: manual or
+  search engine).
 - Hits whose title or snippet names the expert (full name) -> kind `site_hit` (url = the hit's page,
   title = the hit's title, confidence `low`, facts written by code: query, site, what matched). The
   snippet is only checked in memory, never stored (gotchas 10, 15).
@@ -1037,7 +1088,8 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 - Done when: page read without storing text (test); file + text saved under `data/files/` (test);
   redirect to a banned domain refused (test); captcha page blocks the domain (test).
 
-**Tool 8: file review (engineer, T8).** File `app/tools/review_files.py`.
+**Tool 8: file review (engineer, T8; not built).** `app/tools/review_files.py` does not exist: the main
+agent reads files itself with `ask_pdf` (tool 4) and `note_file` (tool 5). The plan was:
 `review_files()`, label "Review files", cap 2.
 - Purpose: go through this expert's files and find new leads (cases, other name forms, employers,
   licences, URLs worth reading).
@@ -1050,7 +1102,10 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 **Tool 9: publications (core, M8).** File `app/tools/openalex.py`.
 `publications()`, label "Publications", cap 1.
 - OpenAlex author records and works for the candidate's OpenAlex ids (first 3, merged, gotcha 12):
-  kinds `author_stats` and `work`, as today. No ids -> `SourceSkipped("no OpenAlex id")`.
+  kinds `author_stats` and `work`, as today. No ids: it searches OpenAlex by name (first 3 records)
+  and keeps only a record whose ORCID, or 2+ work titles of 6+ words, appear in the findings or files
+  already collected (a name alone is never enough, gotcha 13); none ->
+  `SourceSkipped("no OpenAlex author matched the collected sources")`.
 - Reply: counts, h-index, 10 newest works (`ref`, title, year, doi). Legal: gotchas 6, 12.
 
 **Tool 10: retraction check (core, M8).** File `app/tools/crossref.py`.
@@ -1063,7 +1118,7 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 `exclusion_check()`, label "OIG exclusion list", cap 1.
 - OIG LEIE name matches, other-state matches dropped when the state is known: kind
   `leie_possible_match`, confidence `low`, "possible match" note, as today. Known problem: the
-  live ConnectError on the CSV download (PLAN known problems).
+  live ConnectError on the CSV download.
 
 **Tool 12: web search (core, M8).** File `app/tools/web_search.py`.
 `web_search(query: str, topic: Literal["testimony", "credentials", "other"])`, label "Web search", cap 6.
@@ -1073,7 +1128,7 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 - Legal: gotchas 14, 15, 22.
 
 Core tools 9-12 are done when: each has a test with fake sources, keeps the guards it has today, and
-shows in the activity log of the live Stanton run (M8 8b, 8e).
+shows in the activity log of a live test run (M8 8b, 8e).
 
 **Tool 13: pay for document (court helper, dry run).** Tool in `app/tools/courtlistener.py`, decisions
 in `app/purchases.py` (the payment service).
@@ -1092,13 +1147,21 @@ in `app/purchases.py` (the payment service).
   approval.
 - Legal: gotchas 5, 15, 61.
 
+**Tool 14: the profile (core).** File `app/tools/profile_tools.py`. Two tools; nothing saved.
+- `read_profile()`: label "Read the profile", cap 20. The live profile (`app/profile.py`, updated after
+  every tool call that saved findings) as text, each item with its finding refs, at most 7,000 characters.
+- `check_against_profile(item: str, question: str = "")`: label "Check against the profile", cap 30.
+  `item` is a finding ref (`fnd_...`) or text. One model call on `known_so_far` plus the item: reply
+  `same_person` 0-100 (a shared name alone is not evidence), `fit` (new, confirms, contradicts,
+  unrelated) and `answer` (at most 1,000 characters).
+
 ### 4B.10 File split (6g)
 **M7, Builder 1 (framework), first:** `app/tools/__init__.py` (registry, wrapper, `Ctx`),
-`app/main_agent.py`, `app/memory.py`, `app/store.py` (tables, `add_finding`, `add_gap`, activity),
+`app/research_agent.py`, `app/memory.py`, `app/store.py` (tables, `add_finding`, `add_gap`, activity),
 `app/models.py` (`Job.activity`, `ActivityRow`, open `collector`/`kind`), `app/jobs.py` (research
 runs the main agent), `app/config.py` (two numbers), `app/main.py` (only if the job route needs it),
 `tests/fakes.py` (`tool_ctx`, `run_tool`, `add_test_file`), new `tests/test_tools_framework.py` and
-`tests/test_memory.py`, `tests/test_research_api.py` and `tests/test_flow.py` (research expectations
+`tests/test_memory.py`, `tests/test_api_research.py` and `tests/test_api_flow.py` (research expectations
 only). A test-only tool lives in the test, not in `app/tools/`.
 **M7, Builder 2 (after 1):** `app/tools/courtlistener.py`, `tests/test_tool_courtlistener.py`.
 
@@ -1113,9 +1176,9 @@ Lead: DESIGN 4.2-4.4 and 4A marked replaced.
 **Engineer tracks (after M7 is committed):** each owns its tool file + `tests/test_tool_<file>.py`:
 T2 `state_sites.py`, T3 `site_guide.py`, T4 `ask_pdf.py`, T5 `note_file.py`, T6 `firecrawl_search.py` (+ new
 `app/sources/firecrawl_search.py`), T7 `web_reader.py` (+ additions to `app/sources/firecrawl.py`), T8
-`review_files.py`.
+`review_files.py` (not built).
 
-**Frozen after M7:** `app/tools/__init__.py`, `app/main_agent.py`, `app/memory.py`, `app/store.py`,
+**Frozen after M7:** `app/tools/__init__.py`, `app/research_agent.py`, `app/memory.py`, `app/store.py`,
 `app/models.py`, `tests/fakes.py`, `tests/conftest.py`. A change there goes through the lead. Read-only
 for tool builders: `app/sources/*` (except the two above), `app/llm.py`, `app/evidence.py`, `app/http.py`.
 
@@ -1127,14 +1190,17 @@ for tool builders: `app/sources/*` (except the two above), `app/llm.py`, `app/ev
   becomes an open string. Current kinds stay for tools 1, 9-12. The frontend team must be told.
 - **D3.** Tool 1 is plain code with a code-made same-person score (no AI judge) plus a case lookup.
   Tools 1, 9, 10, 11 take no person argument: the agent cannot point them at someone else.
+  Superseded 2026-11-02 (user decision): a court-records helper agent records its own verdict per
+  case (`court_verdict`), with no code score (tool 1 card).
 - **D4.** Long-term memories are read by tools, not pasted into the agent's prompt.
 - **D5.** The research job ends `done` with gaps; it fails only if the model fails before any tool
   call finishes.
 - **D6.** From M7 to M8 a research run has only tool 1 (old collectors unused, removed in M8).
 - **D7.** Starting numbers: 40 model calls, the per-tool caps above, `RESULT_MAX` 8,000 chars, files
-  20 MB, 30 files per job.
-- Open (not for the core): end output of part 2; owners of T2-T8; logins policy (tool 3 engineer,
-  legal check first).
+  20 MB, 30 files per job. Since tuned (`app/config.py`): 1,000 model calls and 4 h per run, each
+  card's cap times 10 (`TOOL_CAP_SCALE`); the 30-files limit was never built.
+- Open (not for the core): end output of part 2 (now the structured profile, `app/expert_profile.py`);
+  owners of T2-T8; logins policy (tool 3 engineer, legal check first).
 
 ## 5. Meta Model API (1d)
 
@@ -1212,31 +1278,38 @@ chains many sources into one answer is less dependable today", so we send short,
 
 ## 7. Sources used in v1 (1e)
 
-Source of truth: the private `SOURCES_AND_FLOW.md` (not in git; "Sources: current list" and "v1 sources: API details").
-All five are marked automated use "Yes" there.
+The first five sources were cleared for automated use before v1. Firecrawl came later: M3 page
+reading, then tools 3, 6 and 7.
 
 | Source | Used for | Limits | Link |
 | --- | --- | --- | --- |
-| CourtListener REST v4 | Candidates, testimony | Token required; 5/min, 50/hour, 125/day; one account | [overview](https://wiki.free.law/c/courtlistener/help/api/rest/v4/overview) |
+| CourtListener REST v4 | Candidates (opinion search); federal cases and filings (RECAP, tool 1) | Token required; 5/min, 50/hour, 125/day; one account | [overview](https://wiki.free.law/c/courtlistener/help/api/rest/v4/overview) |
 | OpenAlex | Candidates, publications | Keyless 10 req/s, $0.10/day shared per IP, first page only | [limits](https://help.openalex.org/how-to-use-the-api/rate-limits-and-authentication) |
 | Crossref REST + Retraction Watch | Publications, retractions | Public 5/s single, 1/s lists, concurrency 1; polite 10/s, 3/s, 3 | [limits](https://www.crossref.org/blog/announcing-changes-to-rest-api-rate-limits/) |
 | OIG LEIE | Exclusions (health) | One CSV, replaced monthly; name hit = possible match | [LEIE](https://oig.hhs.gov/exclusions/exclusions_list.asp) |
-| Meta built-in web search | Candidates, licence/board pages | $2.50 / 1,000 queries; 3,000 RPM | [doc](https://dev.meta.ai/docs/search-grounding) |
+| Meta built-in web search | Candidates, web facts (tool 12), state site discovery (tool 2) | $2.50 / 1,000 queries; 3,000 RPM | [doc](https://dev.meta.ai/docs/search-grounding) |
+| Firecrawl (hosted API v2) | Reading pages and PDFs (tool 7), site guides (tool 3), web and site searches (tool 6) | Key required; at most 8 calls/min (scrape and search share one limiter; Free plan allows 10); scrape: 1 credit per page, +1 per PDF page; search: 2 credits per 10 results; `proxy: basic` (gotcha 24) | [scrape](https://docs.firecrawl.dev/api-reference/endpoint/scrape), [limits](https://docs.firecrawl.dev/rate-limits) |
+| State court and licensing sites | State cases, licences and discipline (tools 2, 3, 6, 7) | Official sites only, never behind a login, paywall or robot check (gotcha 4) | found per state by tool 2 |
 
 Excluded from v1:
 - ORCID: terms ban use "in connection with any revenue-generating product or service", docs conflict; OpenAlex already gives the ORCID iD ([terms](https://info.orcid.org/public-client-terms-of-service/)).
 - SEC EDGAR full-text search: JSON endpoint not documented by the SEC; needs a contact email; useful for few experts ([FAQ](https://www.sec.gov/edgar/search/efts-faq.html)).
 - Caselaw Access Project: bulk files only; CourtListener "already includes all CAP cases" ([LIL post](https://lil.law.harvard.edu/blog/2024/03/26/transitions-for-the-caselaw-access-project/)).
-- Firecrawl (gotcha 1); Tavily, Exa, SerpApi, Serper (section 6); never automate LinkedIn, Google
-  Scholar, Daubert Tracker, TrialSmith, CPAverify, BrokerCheck, ABMS, DocInfo (gotcha 2).
+- Tavily, Exa, SerpApi, Serper (section 6); never automate LinkedIn, Google Scholar, Daubert Tracker,
+  TrialSmith, CPAverify, BrokerCheck, ABMS, DocInfo (gotcha 2).
+
+Firecrawl reads professional records only (gotchas 1, 3).
 
 ## 8. Demo names (1f)
 
-| Name | Why | Proof |
+The table lists the scenarios a live test should cover. Real test targets are picked outside the
+repo (gotcha 8).
+
+| Scenario | Why | Proof |
 | --- | --- | --- |
-| Bennet I. Omalu (forensic pathologist) | Excluded under Daubert/FRE 702; affirmed in *Pritchard v. Dow Agro Sciences* (3d Cir. No. 10-2168, June 2, 2011). OpenAlex splits him over 2 ids with no ORCID on either ("Bennet I. Omalu", 74 works; "Omalu Bennet", 2 works; checked 2026-10-28), so this tests the name-only merge rule (b) in 4.1. | [3d Cir. opinion](https://www2.ca3.uscourts.gov/opinarch/102168np.pdf), [OpenAlex](https://api.openalex.org/authors/A5111620039) |
-| Elizabeth F. Loftus (memory psychologist) | Published opinion: *State v. Frazier*, S.C. Supreme Court, Opinion No. 25763, filed Jan 5, 2004. The defense offered "the videotaped deposition of Dr. Elizabeth Loftus"; the trial court excluded part of it and the court held "this study should have been admitted" (reversed; a partial dissent would have upheld the exclusion). Later passages say only "Dr. Loftus" (gotcha 13 test). This is the kind of opinion the `type=o` search targets; whether CourtListener holds it is not verified (no token yet). OpenAlex: 655 works, ORCID 0000-0002-2230-6110. | [S.C. opinion](https://www.sccourts.org/media/opinions/HTMLFiles/SC/25763.htm), [OpenAlex](https://api.openalex.org/authors/A5015439098) |
-| Dennis D. Weisenburger (hematopathologist) | *Hardeman v. Monsanto*, 9th Cir. Nos. 19-16636/19-16708 (May 14, 2021) reviews Daubert rulings on "Dr. Weisenburger" (surname only); split over 4 OpenAlex ids. | [9th Cir. opinion](https://cdn.ca9.uscourts.gov/datastore/opinions/2021/05/14/19-16636.pdf), [FERN, full name](https://thefern.org/ag_insider/roundup-case-federal-judge-vets-experts-testimony/amp/) |
+| Split author, no ORCID | An expert a court excluded under Daubert/FRE 702, whom OpenAlex splits over 2 ids with no ORCID on either (the name in reverse order on one): tests the name-only merge rule (b) in 4.1. | none (scenario) |
+| Full name once, then surname only | A published opinion that names the expert in full once and later only as `Dr. <Surname>` (gotcha 13 test): the kind of opinion the `type=o` search targets. OpenAlex has one id with an ORCID. | none (scenario) |
+| Surname only in a ruling | An appeals opinion that reviews Daubert rulings on `Dr. <Surname>` only, for an expert whom OpenAlex splits over 4 ids (gotchas 12, 13); a news report gives the full name. | none (scenario) |
 | John Smith (common name) | OpenAlex author search returns 1,236 authors (2026-10-28) | [OpenAlex search](https://api.openalex.org/authors?search=John%20Smith) |
 
 ## 9. Module layout (current)
@@ -1245,7 +1318,7 @@ Updated in the repo cleanup (2026-11-02); which milestone built each file is in 
 
 | File | Contents |
 | --- | --- |
-| `app/main.py` | FastAPI app and the 10 endpoints (thin: validate, call store/jobs) |
+| `app/main.py` | FastAPI app and all its routes (thin: validate, call store/jobs); the list is in `backend/README.md` |
 | `app/config.py` | Settings from `.env` and the environment; `DATA_DIR` is `backend/data` |
 | `app/models.py` | Pydantic shapes: requests, Candidate, Job, Dossier, Finding, Source |
 | `app/http.py` | Shared httpx client, per-source rate limiter, URL cache |
@@ -1256,8 +1329,11 @@ Updated in the repo cleanup (2026-11-02); which milestone built each file is in 
 | `app/jobs.py` | Background jobs: `asyncio` task in the same process, step updates |
 | `app/store.py` | SQLite (stdlib `sqlite3`): every table |
 | `app/memory.py` | Long-term memories of the main agent (4B.4) |
-| `app/profile.py` | The expert profile of a research run |
+| `app/profile.py` | The live profile of a research run, updated after each tool call that saved findings |
 | `app/trace.py` | Run trace of a research job |
+| `app/expert_profile.py` | The structured profile for the results page: one model call when the run ends, code checks, and the view (`GET /dossiers/{id}/expert-profile`) |
+| `app/purchases.py` | Payment service for `pay_for_document` (tool 13): price, budget and value judge; a dry run, nothing is bought |
+| `app/pdf_text.py` | PDF text layer and local OCR (pypdf, pypdfium2, RapidOCR) for court filings |
 | `app/sources/*.py` | Raw source clients (HTTP, rate limits, cache): courtlistener, openalex, crossref, leie, websearch, firecrawl, firecrawl_search; shared helpers in `__init__.py` |
 | `app/tools/*.py` | Main agent tools (4B.9); registry, wrapper and `Ctx` in `__init__.py` |
 | `tests/fakes.py`, `tests/conftest.py` | `FakeModel`, `FakeAdkModel`, `httpx.MockTransport` fixtures; synthetic people only |
@@ -1267,11 +1343,18 @@ Files under `backend/data/` (SQLite file, saved downloads, LEIE CSV) are gitigno
 
 `.env.example` names (empty values):
 - `MODEL_API_KEY`: Meta Model API key (name used in Meta's docs).
-- `MODEL_NAME`: defaults to `muse-spark-1.3`; code refuses any name ending in `-contributor`.
+- `MODEL_NAME`: defaults to `muse-spark-1.3`; code refuses any name containing `contributor`.
 - `COURTLISTENER_TOKEN`: CourtListener API token.
-- `CONTACT_EMAIL`: optional; sent as Crossref `mailto` only when set (open question in PLAN.md).
+- `COURTLISTENER_TOKEN_FALLBACK`: optional; tried once when the main token is refused (401/403), or used
+  alone when `COURTLISTENER_TOKEN` is empty; never after a 429 (gotcha 5).
+- `CONTACT_EMAIL`: optional; when set, sent in the User-Agent of every request made with the shared client
+  (`app/http.py`; not the model API) and as Crossref's `mailto`.
 - `DATABASE_PATH`: defaults to `backend/data/expert_witness.db` (worked out from the code's location,
-  not the folder the server starts in).
+  not the folder the server starts in). Downloads and the LEIE CSV go next to it.
+- `FIRECRAWL_API_KEY`: Firecrawl key for tools 3, 6 and 7 (skipped + gap without it).
+
+Read by `app/config.py` but not in `.env.example`: `DEBUG_TRACE=1` keeps the full run trace (4B.6b; local
+testing only).
 
 ## 10. Open risks and not verified
 
@@ -1290,4 +1373,3 @@ Files under `backend/data/` (SQLite file, saved downloads, LEIE CSV) are gitigno
 - OIG LEIE: no formal terms of use on the page; name matches can be false positives (shown as possible matches only).
 - Exact domains for the gotcha 2 blocklist are to be confirmed in M2.
 - Courts often name experts by surname only (gotcha 13): identity confidence will often be `medium` or `low`.
-- Hackathon Official Rules not read yet (open question in PLAN.md).

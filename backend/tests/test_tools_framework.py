@@ -179,7 +179,7 @@ def test_time_limit_ends_the_job_done(tool_ctx, register_tool, adk_model, monkey
 def test_fetch_ok_refuses_banned_api_and_blocked_sites(tool_ctx):
     memory.block_site("www.Records.Example.gov", "captcha", "https://records.example.gov/search")
     refused = {
-        "https://www.linkedin.com/in/alex-rivera": tools.BANNED_SITE,
+        "https://www.linkedin.com/in/x": tools.BANNED_SITE,
         "https://scholar.google.com/citations?user=x": tools.BANNED_SITE,
         "https://www.dauberttracker.com/x": tools.BANNED_SITE,
         "https://www.courtlistener.com/opinion/1/x/": tools.API_SITE,
@@ -198,7 +198,7 @@ def test_fetch_ok_refuses_banned_api_and_blocked_sites(tool_ctx):
 
 
 def test_add_finding(tool_ctx):
-    assert tool_ctx.add_finding("web_testimony", "Profile", "https://www.linkedin.com/in/alex-rivera") is None
+    assert tool_ctx.add_finding("web_testimony", "Profile", "https://www.linkedin.com/in/x") is None
     assert tool_ctx.add_finding("web_testimony", "Page", "javascript:alert(1)") is None
     ref = tool_ctx.add_finding("web_testimony", "T" * 300, "https://example.org/a", facts={"year": 2019})
     assert ref.startswith("fnd_")

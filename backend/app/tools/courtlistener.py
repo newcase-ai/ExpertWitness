@@ -323,8 +323,8 @@ you already have. CourtListener allows 50 calls an hour for the whole app.
 2. Sort the results. Many people share a name. Compare each case with what we know: court and
 state, kind of case (nature of suit), dates, filing titles and passages, and whether the docket lists
 the person as a party or lawyer. A clearly different person (another first, middle or last name
-such as "Peter Crosby Smith", a debtor in a personal bankruptcy, a lawyer, court staff, a different
-profession) is ruled out at once with court_verdict; download nothing for it.
+such as "Alex Rivera Smith" for Alex Rivera, a debtor in a personal bankruptcy, a lawyer, court
+staff, a different profession) is ruled out at once with court_verdict; download nothing for it.
 3. Read the cases that may be the expert's. Filing titles naming the expert, expert reports,
 declarations, depositions, and motions or orders to exclude, limit or strike an expert are the best
 clues. Download a matched filing with court_file when it is available; when none is, list the case's
@@ -392,7 +392,7 @@ async def court_research(ctx: Ctx, focus: str = "", context: str = "") -> dict:
     court-records helper. It searches, sorts out people with the same name, downloads and reads the
     filings that may be the expert's, and saves each case it judges (the profile then shows them).
     `focus`: what to look for this time; empty = every federal case naming the expert, or name cases
-    you found elsewhere (e.g. "Doe v. Example Co., D. Minn. 0:19-cv-03140"). `context`: what you know
+    you found elsewhere (e.g. "Doe v. Example Co., D. Minn. 0:00-cv-00000"). `context`: what you know
     that helps tell the expert from people with the same name and is not in the profile yet (e.g.
     the CV's case list with the expert's side, employers, other forms of the name). Reply: `cases`
     saved as the expert's (level, role, why, file_ids), `ruled_out` (same-name people), `files`

@@ -12,7 +12,7 @@ from app.config import get_settings
 
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
-# Requests per second per source (PLAN gotchas 5-7). Unknown sources are not limited.
+# Requests per second per source (gotchas 5-7). Unknown sources are not limited.
 RATES = {
     "openalex": 10.0,
     "courtlistener": 5 / 60,  # hour/day caps are counted with store.record_call/calls_since

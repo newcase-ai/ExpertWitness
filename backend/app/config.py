@@ -20,7 +20,7 @@ class Settings:
     contact_email: str | None
     database_path: str
     firecrawl_api_key: str | None = None
-    courtlistener_token_fallback: str | None = None  # used only when the main token is refused (401/403)
+    courtlistener_token_fallback: str | None = None  # used when the main token is unset or refused (401/403); never after a 429
     debug_trace: bool = False  # DEBUG_TRACE=1: the run trace keeps everything in full (local testing only)
 
 
