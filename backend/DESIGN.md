@@ -1141,11 +1141,20 @@ in `app/purchases.py` (the payment service).
   filing's record and the price; never `why`) -> `low_value` under 7 or `judge_failed`; else
   `dry_run`: approved and recorded as "would buy", nothing charged. A filing's decision is final for
   the run (`already_requested`).
-- The ledger in v1: a `purchase` trace event per decision, plus the activity detail.
-- Not yet: live buying (CourtListener RECAP Fetch with a PACER account: gotchas 4, 5), journal
-  articles (open-access check, single-use virtual cards, checkout, webhook reconciliation), human
-  approval.
-- Legal: gotchas 5, 15, 61.
+- Ramp card (only with `PAYMENTS_LIVE=true` and `RAMP_*` keys; `RAMP_ENV` sandbox by default): an
+  approved filing gets a one-time virtual card from `app/sources/ramp.py` (TOTAL limit = the price, the
+  same per-charge limit, no overage, locked after 30 minutes, idempotency key `<job>-<document_id>`)
+  -> `card_ready`, status `card_ready` (counts against the budget). The card is kept in memory only
+  (`run.cards`); the agent, the trace and the activity log see its last 4 digits and Ramp id, never the
+  number. Ramp refusing or missing keys -> `payment_failed` (nothing reserved, the agent may ask
+  again). `purchases.close_cards` terminates every card when the run ends (`research_agent.research`'s
+  `finally`); a card that cannot be closed locks itself. Gotchas 62-64.
+- The ledger in v1: a `purchase` trace event per decision (and `card_closed` / `card_close_failed`),
+  plus the activity detail.
+- Not yet: checkout (nothing uses the card yet: PACER bills a logged-in account, gotcha 4), live
+  buying (CourtListener RECAP Fetch with a PACER account: gotchas 4, 5), journal articles
+  (open-access check, checkout, webhook reconciliation), human approval.
+- Legal: gotchas 5, 15, 61, 64.
 
 **Tool 14: the profile (core).** File `app/tools/profile_tools.py`. Two tools; nothing saved.
 - `read_profile()`: label "Read the profile", cap 20. The live profile (`app/profile.py`, updated after

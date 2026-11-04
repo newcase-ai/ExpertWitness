@@ -20,6 +20,7 @@ RATES = {
     "crossref": 5.0,  # public pool, single records; app/sources/crossref.py also sends 1 at a time
     "oig_leie": 1.0,  # one CSV download a month at most
     "firecrawl": 8 / 60,  # hosted Free plan allows 10 scrapes/min (docs.firecrawl.dev/rate-limits)
+    "ramp": 15.0,  # Ramp allows 200 requests per 10 s per IP (docs.ramp.com/developer-api/v1/rate-limiting)
 }
 
 

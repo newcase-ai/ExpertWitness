@@ -13,7 +13,7 @@ from pydantic import Field
 from app import http, jobs, llm, store
 from app.evidence import Run
 from app.models import Candidate
-from app.sources import courtlistener, crossref, firecrawl, leie, openalex, websearch
+from app.sources import courtlistener, crossref, firecrawl, leie, openalex, ramp, websearch
 from app.tools import REGISTRY, Ctx, tool
 
 NAME = "Alex Rivera"
@@ -167,6 +167,50 @@ def router(routes: dict):
         return httpx.Response(status, json=body)
 
     return httpx.MockTransport(handle), seen
+
+
+# Ramp (app/sources/ramp.py): a synthetic card; 4111... is the well-known test number (Luhn-valid, so
+# the secret checks would catch it too).
+RAMP_PAN = "4111111111111111"
+RAMP_TOKEN = {"access_token": "SYNTHETIC-RAMP-TOKEN", "expires_in": 864_000, "token_type": "Bearer"}
+RAMP_CARD = {"card": {"id": "card-synthetic-1", "pan": RAMP_PAN, "cvv": "SYNTHETIC-CVV", "expiration": "1227"},
+             "spend_limit_id": "fund-synthetic-1"}
+
+
+def ramp_routes(token=(200, RAMP_TOKEN), card=(201, RAMP_CARD), close=(204, None), env="sandbox"):
+    """router routes for Ramp: sign-in and card closing on the API host, the new card on the vault
+    host. Each value is (status, json or None) or an exception to raise."""
+
+    def answer(route, request):
+        if isinstance(route, Exception):
+            raise route
+        status, body = route
+        return httpx.Response(status, json=body) if body is not None else httpx.Response(status)
+
+    api, vault = (httpx.URL(url).host for url in ramp.HOSTS[env])
+    return {api: lambda r: answer(token if r.url.path.endswith("/token") else close, r),
+            vault: lambda r: answer(card, r)}
+
+
+@pytest.fixture(name="ramp_keys")
+def ramp_keys_fixture(monkeypatch):
+    for name, value in {"RAMP_CLIENT_ID": "client-1", "RAMP_CLIENT_SECRET": "secret-1",
+                        "RAMP_USER_ID": "user-1"}.items():
+        monkeypatch.setenv(name, value)
+
+
+@pytest.fixture(name="ramp_http")
+def ramp_http_fixture(monkeypatch, ramp_keys):
+    """Ramp keys set and fake Ramp answers installed. Returns setup(**ramp_routes args) -> seen requests."""
+    monkeypatch.setattr(http, "limiters", {})
+
+    def setup(**routes):
+        transport, seen = router(ramp_routes(**routes))
+        http.set_client(http.make_client(transport))
+        return seen
+
+    yield setup
+    http.set_client(None)
 
 
 DEFAULT_ROUTES = {

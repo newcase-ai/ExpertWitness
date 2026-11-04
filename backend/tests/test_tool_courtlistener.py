@@ -11,16 +11,19 @@ import pytest
 from app import jobs, llm, memory, pdf_text, purchases, store, trace
 from app.profile import PER_KIND, finding_line, known_so_far
 from app.research_agent import first_message
-from app.sources import SourceFailed
+from app.sources import SourceFailed, ramp
 from app.sources import courtlistener as courtlistener_source
 from app.tools import RESULT_MAX, secret
 from app.tools import courtlistener as court
 from tests.fakes import (  # noqa: F401 - fixtures
     EXPERT,
+    RAMP_PAN,
     call,
     cl_docket,
     cl_filing,
     cl_page,
+    ramp_http_fixture,
+    ramp_keys_fixture,
     research_sources_fixture,
     run_tool,
     sources_fixture,
@@ -590,6 +593,92 @@ def test_pay_the_same_filing_twice_at_once_is_one_decision(tool_ctx, judge):
     assert first["reason"] == "dry_run" and second == {"decision": "rejected", "reason": "already_requested",
                                                        "note": purchases.BUSY_NOTE, "already_requested": True}
     assert len(judge["prompts"]) == 1
+
+
+# --- live payments: a one-time Ramp card (PAYMENTS_LIVE=true, fake Ramp answers) ------------------
+
+
+@pytest.fixture(name="live")
+def live_fixture(monkeypatch, ramp_http):
+    monkeypatch.setenv("PAYMENTS_LIVE", "true")
+    return ramp_http
+
+
+def closed(ctx):
+    async def close():
+        token = trace.start(ctx.job_id)
+        try:
+            await purchases.close_cards(ctx)
+        finally:
+            trace.stop(token)
+
+    asyncio.run(close())
+
+
+def purchase_events(ctx):
+    return [e.data for e in store.events(ctx.job_id) if e.kind == "purchase"]
+
+
+def test_pay_live_makes_a_card_the_agent_never_sees(tool_ctx, judge, live):
+    seen = live()
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 8, "reason": "SYNTHETIC the expert's own report"}]
+    reply = pay(tool_ctx, 1108)
+    assert reply == {"decision": "approved", "reason": "card_ready", "cents": 50, "score": 8,
+                     "judge": "SYNTHETIC the expert's own report", "card_last4": "1111", "note": purchases.CARD_NOTE}
+    assert tool_ctx.run.cards[1108].pan == RAMP_PAN and purchases.spent_cents(tool_ctx.run.filings) == 50
+    assert rows(tool_ctx) == [("pay_for_document", "done", "card ready 50c, ends 1111, score 8")]
+    made = json.loads(seen[-1].content)
+    assert made["display_name"] == "ExpertWitness filing 1108"  # no filing title (names) sent to Ramp
+    assert made["spending_restrictions"]["limit"]["amount"] == 50
+    assert seen[-1].headers["x-idempotency-key"] == f"{tool_ctx.job_id}-1108"
+    [event] = purchase_events(tool_ctx)
+    assert event["reason"] == "card_ready" and event["card_id"] == "card-synthetic-1"
+    # gotcha 64: the number and CVV are only on the in-memory card
+    shown = json.dumps(reply) + json.dumps(purchase_events(tool_ctx)) + str(rows(tool_ctx))
+    assert RAMP_PAN not in shown and "SYNTHETIC-CVV" not in shown
+    # a second ask is the same decision, not a second card
+    assert pay(tool_ctx, 1108) == reply | {"already_requested": True} and len(seen) == 2
+
+    closed(tool_ctx)
+    assert seen[-1].method == "DELETE" and seen[-1].url.path == "/developer/v1/funds/fund-synthetic-1"
+    assert tool_ctx.run.cards == {}
+    assert purchase_events(tool_ctx)[-1].items() >= {"document_id": 1108, "status": "card_closed",
+                                                     "card_id": "card-synthetic-1", "card_last4": "1111"}.items()
+
+
+def test_close_cards_never_fails_the_run(tool_ctx, judge, live):
+    live(close=(500, {"error_v2": {"message": "SYNTHETIC"}}))
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 9, "reason": "SYNTHETIC"}]
+    assert pay(tool_ctx, 1108)["reason"] == "card_ready"
+    closed(tool_ctx)  # does not raise: the card's lock date is the backstop
+    assert purchase_events(tool_ctx)[-1]["status"] == "card_close_failed" and tool_ctx.run.cards == {}
+
+
+def test_pay_live_ramp_failure_reserves_nothing(tool_ctx, judge, live):
+    live(card=(500, {"error_v2": {"message": "SYNTHETIC-RAMP-ERROR"}}))
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 9, "reason": "SYNTHETIC"}]
+    assert pay(tool_ctx, 1108) == {"decision": "rejected", "reason": "payment_failed", "cents": 50,
+                                   "note": "Ramp new card failed (HTTP 500); asking again later may help"}
+    assert "purchase" not in tool_ctx.run.filings[1108] and tool_ctx.run.cards == {}
+    assert purchases.spent_cents(tool_ctx.run.filings) == 0
+
+
+def test_pay_live_without_ramp_keys_is_a_payment_failure(tool_ctx, judge, monkeypatch):
+    monkeypatch.setenv("PAYMENTS_LIVE", "true")
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 9, "reason": "SYNTHETIC"}]
+    reply = pay(tool_ctx, 1108)
+    assert reply["reason"] == "payment_failed" and reply["note"] == ramp.NO_KEYS
+
+
+def test_pay_live_low_value_makes_no_card(tool_ctx, judge, live):
+    seen = live()
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 3, "reason": "SYNTHETIC"}]
+    assert pay(tool_ctx, 1108)["reason"] == "low_value" and seen == [] and tool_ctx.run.cards == {}
 
 
 def test_court_helper_can_ask_to_buy(tool_ctx, research_sources, adk_model):

@@ -3,23 +3,31 @@ CourtListener is worth buying from PACER. The agent only asks (pay_for_document 
 app/tools/courtlistener.py); the price, title and availability come from CourtListener's record of the
 filing, never from the agent, and the value judge never sees the agent's reason (gotcha 61).
 
-v1 is a dry run (user, 2026-11-04): an approved purchase is recorded as "would buy" and nothing is
-charged. Every decision is a trace event (`purchase`), so the limits can be tuned from real runs."""
+By default a dry run (user, 2026-11-04): an approved purchase is recorded as "would buy" and nothing is
+charged. With PAYMENTS_LIVE=true, an approved purchase gets a one-time Ramp virtual card
+(app/sources/ramp.py) for its price, locked after 30 minutes; the card stays in memory (`run.cards`)
+and close_cards terminates it when the run ends. Checkout is not built yet, so nothing is bought either
+way. The agent never sees the card, only its last 4 digits (gotcha 64). Every decision is a trace event
+(`purchase`), so the limits can be tuned from real runs."""
 
 from app import llm, trace
+from app.config import get_settings
 from app.profile import known_so_far
+from app.sources import SourceFailed, SourceSkipped, ramp
 
 RUN_BUDGET_CENTS = 1_000  # per research run
 AUTO_BUY_MAX_CENTS = 300  # approved only at or under this price
 MIN_SCORE = 7  # value judge score (0-10) to approve
 PAGE_CENTS, DOC_MAX_CENTS = 10, 300  # PACER: $0.10 a page, at most $3.00 a filing (transcripts excluded)
-SPENDING = ("judging", "would_buy")  # purchase states counted against the run's budget
+SPENDING = ("judging", "would_buy", "card_ready")  # purchase states counted against the run's budget
 TITLE_SHOWN, PASSAGE_SHOWN, FILES_SHOWN, REASON_MAX = 200, 300, 20, 200
 
 # Fixed texts (never source or model text)
 FREE_NOTE = "this filing is public: download it with court_file"
 BUSY_NOTE = "a decision on this filing is still being made"
 DRY_RUN_NOTE = "purchases are off (dry run): the filing was not bought"
+CARD_NOTE = (f"a one-time card was made for this filing, but checkout is not built yet: the filing was not "
+             f"bought; the card locks in {ramp.LOCK_MINUTES} minutes and is closed when the run ends")
 TASK = ("Research one expert witness for a lawsuit: their qualifications, the cases they worked on and their "
         "role, what they said, how courts ruled on their testimony, and anything opposing counsel could use.")
 JUDGE_SCHEMA = {
@@ -78,14 +86,36 @@ async def judge(ctx, doc: dict, case: str, cents: int) -> tuple[int, str]:
         raise JudgeFailed("the value judge gave no usable answer") from e
 
 
-def logged(ctx, doc: dict, case: str, reply: dict) -> dict:
+def logged(ctx, doc: dict, case: str, reply: dict, **extra) -> dict:
     """Every decision: a `purchase` trace event (the ledger in v1) and the activity detail."""
     trace.record("purchase", document_id=doc["id"], case=case, title=(doc.get("description") or "")[:TITLE_SHOWN],
-                 **reply)
+                 **reply, **extra)
     score = f", score {reply['score']}" if "score" in reply else ""
-    ctx.log(f"would buy {reply['cents']}c{score}" if reply["decision"] == "approved"
-            else f"rejected: {reply['reason']}{score}")
+    if reply["reason"] == "card_ready":
+        ctx.log(f"card ready {reply['cents']}c, ends {reply['card_last4']}{score}")
+    else:
+        ctx.log(f"would buy {reply['cents']}c{score}" if reply["decision"] == "approved"
+                else f"rejected: {reply['reason']}{score}")
     return reply
+
+
+async def new_card(ctx, doc: dict, cents: int) -> ramp.Card:
+    """A Ramp card for this filing's price. The idempotency key is the job and filing, so asking again
+    after a lost answer gives back the same card. No filing title is sent to Ramp (it may name people)."""
+    return await ramp.create_card(cents, f"ExpertWitness filing {doc['id']}", f"{ctx.job_id}-{doc['id']}")
+
+
+async def close_cards(ctx) -> None:
+    """Terminate every card this run made (cannot be undone). Never raises: a card that cannot be closed
+    still locks itself at its lock date."""
+    for document_id, card in list(ctx.run.cards.items()):
+        try:
+            await ramp.terminate(card.fund_id)
+            status = "card_closed"
+        except Exception:  # noqa: BLE001 - the run's end must not fail on Ramp; the lock date is the backstop
+            status = "card_close_failed"
+        trace.record("purchase", document_id=document_id, status=status, card_id=card.id, card_last4=card.last4)
+        del ctx.run.cards[document_id]
 
 
 async def request(ctx, doc: dict, case: str) -> dict:
@@ -107,13 +137,23 @@ async def request(ctx, doc: dict, case: str) -> dict:
     doc["purchase"] = {"status": "judging", "cents": cents}
     try:
         score, reason = await judge(ctx, doc, case, cents)
+        approved = score >= MIN_SCORE
+        card = await new_card(ctx, doc, cents) if approved and get_settings().payments_live else None
     except JudgeFailed:
         doc.pop("purchase", None)  # no decision: the agent may ask again
         return logged(ctx, doc, case, decision(False, "judge_failed", cents=cents))
+    except (SourceFailed, SourceSkipped) as e:  # no card: nothing is reserved, the agent may ask again
+        doc.pop("purchase", None)
+        return logged(ctx, doc, case, decision(False, "payment_failed", cents=cents, note=str(e)))
     except BaseException:  # cancelled or failed: nothing stays reserved
         doc.pop("purchase", None)
         raise
-    approved = score >= MIN_SCORE
+    if card:
+        ctx.run.cards[doc["id"]] = card
+        reply = decision(True, "card_ready", cents=cents, score=score, judge=reason, card_last4=card.last4,
+                         note=CARD_NOTE)
+        doc["purchase"] = {"status": "card_ready", "cents": cents, "reply": reply}
+        return logged(ctx, doc, case, reply, card_id=card.id)
     reply = decision(approved, "dry_run" if approved else "low_value", cents=cents, score=score, judge=reason,
                      **({"note": DRY_RUN_NOTE} if approved else {}))
     doc["purchase"] = {"status": "would_buy" if approved else "rejected", "cents": cents, "reply": reply}
