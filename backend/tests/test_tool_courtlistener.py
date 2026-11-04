@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app import jobs, memory, pdf_text, store
+from app import jobs, llm, memory, pdf_text, purchases, store, trace
 from app.profile import PER_KIND, finding_line, known_so_far
 from app.research_agent import first_message
 from app.sources import SourceFailed
@@ -467,3 +467,133 @@ def test_new_ids_are_never_all_digits(monkeypatch):
     tokens = iter(["4111111111111111", "0123456789abcdef"])
     monkeypatch.setattr(store.secrets, "token_hex", lambda n: next(tokens))
     assert store.new_id("file") == "file_0123456789abcdef"
+
+
+# --- pay_for_document (the payment service in app/purchases.py, a dry run in v1) -------------------
+
+PAY_WHY = "SYNTHETIC-WHY the expert's own report"  # marker: the value judge must never see it
+
+
+@pytest.fixture(name="judge")
+def judge_fixture(monkeypatch):
+    """A fake value judge: replies pop from `replies` (an Exception is raised) and every prompt is kept.
+    Each call yields once, so parallel tool calls really interleave."""
+    state = {"replies": [], "prompts": []}
+
+    async def fake(instructions, input, schema=None, web_search=False, output_type=None):
+        state["prompts"].append(input)
+        await asyncio.sleep(0)
+        reply = state["replies"].pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return llm.ModelResult(data=reply)
+
+    monkeypatch.setattr(llm, "call_model", fake)
+    return state
+
+
+def offered(ctx, *docs):
+    """Filings court_search showed for docket 11 (so their ids work in pay_for_document)."""
+    ctx.run.cases[11] = cl_docket(11, "2021-05-01")
+    ctx.run.caps["pay_for_document"] = 10
+    court.remember(ctx, 11, list(docs))
+
+
+def not_public(n, pages=5, description="Exhibit 8, Expert report of Alex J. Rivera"):
+    return cl_filing(11, n=n, available=False, pages=pages, description=description) | {
+        "entry": "SYNTHETIC EXHIBIT re Motion for Summary Judgment filed by Defendant Example Co."}
+
+
+async def paid(ctx, *document_ids, why=PAY_WHY):
+    """pay_for_document for each id, in parallel, with the run's trace on."""
+    token = trace.start(ctx.job_id)
+    try:
+        return await asyncio.gather(*[run_tool(ctx, "pay_for_document", document_id=d, why=why) for d in document_ids])
+    finally:
+        trace.stop(token)
+
+
+def pay(ctx, document_id, why=PAY_WHY):
+    return asyncio.run(paid(ctx, document_id, why=why))[0]
+
+
+def test_pay_approves_in_dry_run_and_logs_the_decision(tool_ctx, judge):
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 8, "reason": "SYNTHETIC the expert's own report"}]
+    assert pay(tool_ctx, 1108) == {"decision": "approved", "reason": "dry_run", "cents": 50, "score": 8,
+                                   "judge": "SYNTHETIC the expert's own report", "note": purchases.DRY_RUN_NOTE}
+    assert tool_ctx.run.filings[1108]["purchase"]["status"] == "would_buy"
+    assert rows(tool_ctx) == [("pay_for_document", "done", "would buy 50c, score 8")]
+    [event] = [e for e in store.events(tool_ctx.job_id) if e.kind == "purchase"]
+    assert event.data["decision"] == "approved" and event.data["cents"] == 50 and event.data["document_id"] == 1108
+    # the judge sees CourtListener's record and the price, never the agent's reason
+    [prompt] = judge["prompts"]
+    assert "Exhibit 8, Expert report of Alex J. Rivera" in prompt and "Doe v. Example Co. 11" in prompt
+    assert "Price: $0.50" in prompt and "Name: Alex Rivera" in prompt and "SYNTHETIC-WHY" not in prompt
+    assert "Docket entry: SYNTHETIC EXHIBIT re Motion for Summary Judgment" in prompt
+
+
+def test_pay_public_filing_is_free_and_needs_no_judge(tool_ctx, judge):
+    offered(tool_ctx, cl_filing(11))
+    assert pay(tool_ctx, 1102) == {"decision": "rejected", "reason": "free_copy_found", "note": purchases.FREE_NOTE}
+    assert judge["prompts"] == [] and rows(tool_ctx) == [("pay_for_document", "done", "rejected: free_copy_found")]
+
+
+def test_pay_low_value_is_final_for_the_filing(tool_ctx, judge):
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 4, "reason": "SYNTHETIC already covered"}]
+    first = pay(tool_ctx, 1108)
+    assert first["decision"] == "rejected" and first["reason"] == "low_value" and first["score"] == 4
+    assert pay(tool_ctx, 1108) == first | {"already_requested": True}
+    assert len(judge["prompts"]) == 1  # the repeat costs no judge call
+
+
+def test_pay_judge_failure_can_be_retried(tool_ctx, judge):
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [llm.ModelError("SYNTHETIC model down"), {"score": "high"}, {"score": 9, "reason": "ok"}]
+    assert pay(tool_ctx, 1108)["reason"] == "judge_failed"
+    assert pay(tool_ctx, 1108)["reason"] == "judge_failed"  # bad JSON too
+    assert "purchase" not in tool_ctx.run.filings[1108]
+    assert pay(tool_ctx, 1108)["reason"] == "dry_run"
+
+
+def test_pay_a_failure_mid_judge_leaves_nothing_reserved(tool_ctx, judge):
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [RuntimeError("SYNTHETIC crash")]
+    assert pay(tool_ctx, 1108)["error"].startswith("source call failed")
+    assert "purchase" not in tool_ctx.run.filings[1108] and rows(tool_ctx)[0][1] == "failed"
+
+
+def test_pay_price_limits_and_refusals(tool_ctx, judge):
+    offered(tool_ctx, not_public(8, description="TRANSCRIPT of Hearing held 9-30-10"))
+    assert pay(tool_ctx, 1108) == {"decision": "rejected", "reason": "over_price", "cents": None}
+    assert pay(tool_ctx, 999) == {"error": court.UNKNOWN_FILING}
+    assert pay(tool_ctx, 1108, why=" ") == {"error": court.PAY_WHY}
+    assert pay(tool_ctx, 1108, why="x" * (court.PAY_WHY_MAX + 1)) == {"error": court.PAY_WHY}
+    assert judge["prompts"] == []
+
+
+def test_pay_parallel_requests_cannot_overspend(tool_ctx, judge, monkeypatch):
+    """Two filings racing for the run's last $3.50: one is judged and approved, the other is over budget."""
+    monkeypatch.setattr(purchases, "RUN_BUDGET_CENTS", 350)
+    offered(tool_ctx, not_public(8, pages=None), not_public(9, pages=None))
+    judge["replies"] = [{"score": 9, "reason": "SYNTHETIC"}]
+    replies = asyncio.run(paid(tool_ctx, 1108, 1109))
+    assert sorted(r["reason"] for r in replies) == ["dry_run", "over_budget"]
+    assert len(judge["prompts"]) == 1 and purchases.spent_cents(tool_ctx.run.filings) == 300
+
+
+def test_pay_the_same_filing_twice_at_once_is_one_decision(tool_ctx, judge):
+    offered(tool_ctx, not_public(8))
+    judge["replies"] = [{"score": 9, "reason": "SYNTHETIC"}]
+    first, second = asyncio.run(paid(tool_ctx, 1108, 1108))
+    assert first["reason"] == "dry_run" and second == {"decision": "rejected", "reason": "already_requested",
+                                                       "note": purchases.BUSY_NOTE, "already_requested": True}
+    assert len(judge["prompts"]) == 1
+
+
+def test_court_helper_can_ask_to_buy(tool_ctx, research_sources, adk_model):
+    research_sources()
+    research(tool_ctx, adk_model, [call("court_search"), call("pay_for_document", document_id=1102, why=PAY_WHY),
+                                   "SYNTHETIC done", "SYNTHETIC report"])
+    assert ("pay_for_document", "done", "rejected: free_copy_found") in rows(tool_ctx)

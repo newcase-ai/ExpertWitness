@@ -132,3 +132,4 @@ Copied from the private `backend/PLAN.md` §8 on 2026-11-02. File names were upd
 58. `Ctx.keep_file` skips the `API_HOSTS` rule on purpose (court files come from CourtListener): never use it for page fetches (gotcha 40).
 59. A tool reply over `RESULT_MAX` is dropped whole by the wrapper: replies with file or case lists must be capped or cut (`court_records` uses `fit`).
 60. `store.new_id` ids (prefix + 16 hex) could hold 12+ digits in a row and failed the card check (~1 in 30 court files dropped): `new_id` now never returns an all-digit id, and `tools.secret` blanks our ids (`tools.OWN_IDS`, only with an a-f letter, so a card number after a prefix is still caught).
+61. `pay_for_document` takes a `document_id` only: the price, title and availability come from CourtListener's record of the filing, never from the agent, and the value judge never sees the agent's `why` or any page text (a paywall page could tell the agent to pay).

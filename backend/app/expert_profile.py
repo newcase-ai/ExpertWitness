@@ -278,6 +278,8 @@ def cases_of(findings: list[Finding]) -> list[Case]:
             name=f.facts.get("case_name") or f.title, court=f.facts.get("court") or "",
             docket_number=f.facts.get("docket_number"), year=year_of(f.facts.get("date_filed")), url=f.url,
             nature_of_suit=f.facts.get("nature_of_suit"), involvement=match.get("role"),
+            # ponytail: the court tool writes no summary yet; its verdict reasons stand in
+            summary=f.facts.get("summary") or " ".join(match.get("reasons") or []) or None,
             refs=[f.finding_id], confidence="high" if match.get("level", "high") == "high" else "low"))
     return sorted(cases, key=lambda c: c.year or 0, reverse=True)
 

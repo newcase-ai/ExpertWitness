@@ -252,7 +252,7 @@ export interface ExpertProfileView {
   memberships: Section<Sourced>
   fees: Section<Refs & { service: string; amount: string }>
   testimony_summary: Section<Sourced>
-  cases: Section<Refs & { name: string; court: string; docket_number: string | null; year: number | null; url: string; nature_of_suit: string | null; involvement: string | null; side: 'plaintiff' | 'defense' | 'unknown' }>
+  cases: Section<Refs & { name: string; court: string; docket_number: string | null; year: number | null; url: string; nature_of_suit: string | null; involvement: string | null; summary: string | null; side: 'plaintiff' | 'defense' | 'unknown' }>
   documents: Section<Refs & { title: string; case_name: string | null; date: string | null; url: string; page_count: number | null; file_id: string | null }>
   risk: Record<'license_status' | 'board_discipline' | 'exclusion_lists' | 'retractions', RiskCheck>
   red_flags: Section<Sourced>
