@@ -80,6 +80,9 @@ class Run:
     filings: dict[int, dict] = field(default_factory=dict)
     # court_search paging: (words, case_name) -> {"queue": hits not shown yet, "next": link, "total": n}
     searches: dict[tuple[str, str], dict] = field(default_factory=dict)
+    # Ramp virtual cards made by the payment service (document id -> ramp.Card): memory only, never
+    # stored; app/purchases.close_cards terminates them when the run ends (gotcha 64)
+    cards: dict[int, typing.Any] = field(default_factory=dict)
 
     def left(self) -> float:
         """Seconds left in the budget (0 or less: stop)."""

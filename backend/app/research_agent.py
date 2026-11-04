@@ -2,7 +2,7 @@
 expert until it replies DONE or hits the step or time limit. Its final text is thrown away; only
 what the tools saved counts."""
 
-from app import config, llm, trace
+from app import config, llm, purchases, trace
 from app.config import get_settings
 from app.evidence import Run
 from app.models import Candidate
@@ -94,5 +94,6 @@ async def research(job_id: str, dossier_id: str, expert: Candidate,
                  instructions=INSTRUCTIONS, message=shown)
     try:
         return await llm.run_agent(agent, message, max_llm_calls=config.MAX_AGENT_CALLS, timeout=run.left())
-    finally:  # DONE, a limit or a model error: report court cases read but never judged
+    finally:  # DONE, a limit or a model error: report court cases read but never judged, close cards
         gap_unjudged(ctx)
+        await purchases.close_cards(ctx)

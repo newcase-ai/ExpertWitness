@@ -57,8 +57,10 @@ flowchart LR
   people with the same name, downloads the filings that may be the expert's (with OCR for scans) and records
   a verdict for each case. When a key filing is not public, it can ask to buy it from PACER (`pay_for_document`).
   A separate payment service (`app/purchases.py`) decides from CourtListener's record of the filing, never from
-  the agent: at most $3 a filing, $10 a run, and a value check. For now this is a dry run: an approved request is
-  only recorded as "would buy" and nothing is charged.
+  the agent: at most $3 a filing, $10 a run, and a value check. By default this is a dry run: an approved request is
+  only recorded as "would buy" and nothing is charged. With `PAYMENTS_LIVE=true`, an approved request gets a
+  one-time [Ramp](https://docs.ramp.com/developer-api/v1/virtual-cards) virtual card for its price, which is closed
+  when the run ends.
 - **Two profiles.** A live profile updates as findings come in. At the end, one model call organizes
   everything into the profile the results page shows. A value that cites no collected finding is dropped, and
   contact details must appear in a cited source.
@@ -129,6 +131,8 @@ Settings in `backend/.env`:
 | `FIRECRAWL_API_KEY` | Reading web pages and PDFs, site guides and Firecrawl searches; those tools are skipped without it |
 | `DATABASE_PATH` | Optional, default `backend/data/expert_witness.db` |
 | `DEBUG_TRACE` | Optional. `1` keeps the full run trace, for local debugging only |
+| `PAYMENTS_LIVE` | Optional, default `false`. `true` makes a one-time Ramp card for each approved filing purchase |
+| `RAMP_CLIENT_ID`, `RAMP_CLIENT_SECRET`, `RAMP_USER_ID`, `RAMP_ENV` | Ramp cards (needed with `PAYMENTS_LIVE=true`). `RAMP_ENV` is `sandbox` (default) or `production` |
 
 The frontend also has two design mockups with canned data, `/experts/demo-1` and `/experts/demo-2`. Their data
 is in `frontend/src/lib/mocks/`.
@@ -157,7 +161,7 @@ backend/
   app/sources/             source clients: HTTP, rate limits, caching
   app/profile.py           the live profile, updated while the agent works
   app/expert_profile.py    the final, structured profile
-  app/purchases.py         the dry-run payment service for court filings
+  app/purchases.py         the payment service for court filings (dry run by default)
   tests/                   offline tests with fakes
   DESIGN.md                the design and the tool cards
 frontend/src/

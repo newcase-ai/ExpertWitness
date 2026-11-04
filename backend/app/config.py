@@ -22,6 +22,12 @@ class Settings:
     firecrawl_api_key: str | None = None
     courtlistener_token_fallback: str | None = None  # used when the main token is unset or refused (401/403); never after a 429
     debug_trace: bool = False  # DEBUG_TRACE=1: the run trace keeps everything in full (local testing only)
+    # Ramp virtual cards (app/sources/ramp.py): made only when payments_live is on (PAYMENTS_LIVE=true)
+    ramp_client_id: str | None = None
+    ramp_client_secret: str | None = None
+    ramp_user_id: str | None = None  # the Ramp user who owns the cards
+    ramp_env: str = "sandbox"  # "sandbox" or "production"
+    payments_live: bool = False
 
 
 def read_env_file(path: Path) -> dict[str, str]:
@@ -52,6 +58,9 @@ def get_settings() -> Settings:
     model_name = value("MODEL_NAME") or DEFAULT_MODEL
     if is_banned_model(model_name):
         raise ValueError("MODEL_NAME must not be a contributor model (Meta terms 6.2)")
+    ramp_env = (value("RAMP_ENV") or "sandbox").lower()
+    if ramp_env not in ("sandbox", "production"):
+        raise ValueError("RAMP_ENV must be sandbox or production")
     return Settings(
         model_api_key=value("MODEL_API_KEY"),
         model_name=model_name,
@@ -61,4 +70,9 @@ def get_settings() -> Settings:
         firecrawl_api_key=value("FIRECRAWL_API_KEY"),
         courtlistener_token_fallback=value("COURTLISTENER_TOKEN_FALLBACK"),
         debug_trace=(value("DEBUG_TRACE") or "").lower() in ("1", "true", "yes"),
+        ramp_client_id=value("RAMP_CLIENT_ID"),
+        ramp_client_secret=value("RAMP_CLIENT_SECRET"),
+        ramp_user_id=value("RAMP_USER_ID"),
+        ramp_env=ramp_env,
+        payments_live=(value("PAYMENTS_LIVE") or "").lower() in ("1", "true", "yes"),
     )

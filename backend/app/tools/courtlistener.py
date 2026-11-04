@@ -167,9 +167,10 @@ async def pay_for_document(ctx: Ctx, document_id: int, why: str) -> dict:
     or CV, or a motion or ruling about their testimony. `why`: what it would add, in a sentence. A
     separate payment service decides; it reads the price, title and case from CourtListener, not from
     you. Reply: `decision` (approved or rejected) and `reason`: dry_run (approved, but purchases are
-    off: not bought), free_copy_found (it is public: use court_file), over_price, over_budget (the
-    run's limit), low_value (not worth it), judge_failed (ask again later). A rejection is final for
-    this filing: move on."""
+    off: not bought), card_ready (approved, a one-time card was made, but checkout is not built yet:
+    not bought), free_copy_found (it is public: use court_file), over_price, over_budget (the run's
+    limit), low_value (not worth it), judge_failed or payment_failed (ask again later). A rejection is
+    final for this filing: move on."""
     doc = ctx.run.filings.get(document_id)
     if doc is None:
         return refuse(UNKNOWN_FILING)
