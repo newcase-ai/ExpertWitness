@@ -262,7 +262,7 @@ def test_search_dockets_full_name_only_and_fields(sources):
     first, second = hit["documents"]  # every matched filing, each with its own passage
     assert (first["id"], first["available"], first["filepath_local"], first["passage"]) == (501, False, None,
                                                                                           "no match here")
-    assert second == {"id": 502, "description": "Exhibit 2", "document_number": "2", "attachment_number": None,
+    assert second == {"id": 502, "description": "Exhibit 2", "entry": "", "document_number": "2", "attachment_number": None,
                       "date_filed": "2021-02-08", "page_count": 4, "available": True,
                       "filepath_local": "recap/gov.uscourts.exd.5/gov.uscourts.exd.5.2.0.pdf",
                       "url": "https://www.courtlistener.com/docket/5/2/doe-v-example-co/", "passage": second["passage"]}
@@ -369,7 +369,7 @@ def test_docket_documents_query_shape_and_filter(sources):
     assert params["type"] == "rd" and params["q"] == "docket_id:7 AND is_available:true"
     assert seen[0].headers["Authorization"] == "Token test-token"
     assert [d["id"] for d in docs] == [901, 909]
-    assert docs[0] == {"id": 901, "description": "SYNTHETIC Expert report 1 & CV", "document_number": "1",
+    assert docs[0] == {"id": 901, "description": "SYNTHETIC Expert report 1 & CV", "entry": "", "document_number": "1",
                        "attachment_number": None, "date_filed": "2021-02-08", "page_count": 12, "available": True,
                        "filepath_local": "recap/gov.uscourts.exd.7/gov.uscourts.exd.7.1.0.pdf",
                        "url": "https://www.courtlistener.com/docket/7/1/doe-v-example-co/"}

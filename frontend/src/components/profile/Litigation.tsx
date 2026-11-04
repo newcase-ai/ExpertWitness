@@ -107,11 +107,18 @@ export function CaseList({ cases }: { cases: ExpertCase[] }) {
             <div>
               <div className="text-[15px] font-semibold italic">
                 <MarkNum mark={mark} />
-                {c.name}
+                {c.url ? (
+                  <a href={c.url} target="_blank" rel="noreferrer" className="hover:text-primary hover:underline">
+                    {c.name}
+                  </a>
+                ) : (
+                  c.name
+                )}
               </div>
               <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
                 {c.description} {c.court}
               </p>
+              {c.summary && <p className="mt-2 text-sm leading-relaxed">{c.summary}</p>}
               <MarkNote mark={mark} />
             </div>
             <div className="text-right text-sm">

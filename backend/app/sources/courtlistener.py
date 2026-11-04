@@ -474,6 +474,7 @@ def to_document(result: dict) -> dict | None:
     return {
         "id": result["id"],
         "description": clean(result.get("short_description") or result.get("description"))[:200],
+        "entry": clean(result.get("description"))[:400],  # the docket entry's full text: who filed it, for the value judge
         "document_number": str(number) if isinstance(number, int | str) and str(number) else None,
         "attachment_number": attachment if isinstance(attachment, int) else None,
         "date_filed": clean(result.get("entry_date_filed")),

@@ -1075,6 +1075,23 @@ site it read is added to that state's sites (tool 2's memory, `notes` `learned: 
 Core tools 9-12 are done when: each has a test with fake sources, keeps the guards it has today, and
 shows in the activity log of the live Stanton run (M8 8b, 8e).
 
+**Tool 13: pay for document (court helper, dry run).** Tool in `app/tools/courtlistener.py`, decisions
+in `app/purchases.py` (the payment service).
+`pay_for_document(document_id: int, why: str)`, label "Buy a filing", cap 2, helper-only (`HELPER_TOOLS`).
+- The agent only asks; the service decides from CourtListener's record of the filing
+  (`ctx.run.filings`), never from the agent: public -> `free_copy_found`; PACER price in cents
+  (`min(10 * pages, 300)`, 300 when pages are unknown, transcripts `over_price`); the run's budget
+  (1000 cents, reserved with no await before the judge, so parallel calls cannot overspend) ->
+  `over_budget`; a value judge (one `call_model`, score 0-10 on the task, what the run has, the
+  filing's record and the price; never `why`) -> `low_value` under 7 or `judge_failed`; else
+  `dry_run`: approved and recorded as "would buy", nothing charged. A filing's decision is final for
+  the run (`already_requested`).
+- The ledger in v1: a `purchase` trace event per decision, plus the activity detail.
+- Not yet: live buying (CourtListener RECAP Fetch with a PACER account: gotchas 4, 5), journal
+  articles (open-access check, single-use virtual cards, checkout, webhook reconciliation), human
+  approval.
+- Legal: gotchas 5, 15, 61.
+
 ### 4B.10 File split (6g)
 **M7, Builder 1 (framework), first:** `app/tools/__init__.py` (registry, wrapper, `Ctx`),
 `app/main_agent.py`, `app/memory.py`, `app/store.py` (tables, `add_finding`, `add_gap`, activity),

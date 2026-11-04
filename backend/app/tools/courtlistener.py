@@ -1,9 +1,10 @@
 """Tool 1: court records (CourtListener's RECAP archive of PACER dockets; DESIGN 4B.9). The main agent
 calls court_research; its court-records helper (a sub-agent, user decision 2026-11-02) chooses what
-to search, which filings to read, and decides itself whether a case is about the expert, with four
+to search, which filings to read, and decides itself whether a case is about the expert, with five
 helper-only tools: court_search -> cases and the filings that matched the name; court_filings -> all
 public filings of a case; court_file -> one filing downloaded with its text, for ask_pdf;
-court_verdict -> the same-person decision, saved as the case's finding. court_research replies with
+court_verdict -> the same-person decision, saved as the case's finding; pay_for_document -> a request
+to buy a filing that is not public (app/purchases.py decides). court_research replies with
 what was saved plus the helper's report (cases, leads, what it searched).
 
 The search always holds the full name (gotcha 13); code drops and scores nothing. Rate limits, cache
@@ -14,7 +15,7 @@ import asyncio
 import json
 import time
 
-from app import llm, pdf_text, trace
+from app import llm, pdf_text, purchases, trace
 from app.evidence import copied, refuse, squash
 from app.profile import known_so_far
 from app.sources import SourceFailed, SourceSkipped, courtlistener, fold
@@ -25,6 +26,7 @@ CASE_NAME_MAX = 200
 TITLE_SHOWN = 100
 PASSAGE_SHOWN = 300
 REASON_MAX = 300
+PAY_WHY_MAX = 300
 FILES_KEPT = 10  # downloaded filings listed in a verdict's facts
 NAME_PAGES_MAX = 20
 REPLY_BUDGET = RESULT_MAX - 300  # room for the counts next to the list
@@ -39,7 +41,9 @@ MORE_GAP = "court filings of {} past the first {} not listed"
 NO_SEARCH = "more=true continues a search: call court_search with these words and case_name first"
 UNKNOWN_CASE = "unknown docket_id: use one from a court_search reply"
 UNKNOWN_FILING = "unknown document_id: use one from a court_search or court_filings reply"
-NOT_AVAILABLE = "this filing is not public on CourtListener (nobody bought it from PACER): it cannot be downloaded"
+NOT_AVAILABLE = ("this filing is not public on CourtListener (nobody bought it from PACER): it cannot be "
+                 "downloaded; if it matters, ask for it with pay_for_document")
+PAY_WHY = f"why: say in at most {PAY_WHY_MAX} characters what this filing would add"
 NO_TEXT = "no text could be read from this filing"
 OCR_TIME = "the run's time ran out while reading this scanned filing"
 BAD_ROLE = f"role must be one of: {', '.join(ROLES)}"
@@ -154,6 +158,25 @@ async def court_filings(ctx: Ctx, docket_id: int) -> dict:
     ctx.log(f"{len(docs)} filings" + (f", {not_shown} not shown" if not_shown else ""))
     return ({"docket_id": docket_id, "filings": shown} | ({"not_shown": not_shown} if not_shown else {})
             | ({"more_not_listed": True} if more_left else {}))
+
+
+@tool(label="Buy a filing", cap=2, main=False)
+async def pay_for_document(ctx: Ctx, document_id: int, why: str) -> dict:
+    """Ask to buy one court filing that is not public (`available` false), a `document_id` from
+    court_search or court_filings, when it matters: the expert's own report, declaration, deposition
+    or CV, or a motion or ruling about their testimony. `why`: what it would add, in a sentence. A
+    separate payment service decides; it reads the price, title and case from CourtListener, not from
+    you. Reply: `decision` (approved or rejected) and `reason`: dry_run (approved, but purchases are
+    off: not bought), free_copy_found (it is public: use court_file), over_price, over_budget (the
+    run's limit), low_value (not worth it), judge_failed (ask again later). A rejection is final for
+    this filing: move on."""
+    doc = ctx.run.filings.get(document_id)
+    if doc is None:
+        return refuse(UNKNOWN_FILING)
+    if not why.strip() or len(why) > PAY_WHY_MAX:
+        return refuse(PAY_WHY)
+    case = (ctx.run.cases.get(doc.get("docket_id")) or {}).get("case_name") or "unknown case"
+    return await purchases.request(ctx, doc, case)
 
 
 def numbered(pages: list[str]) -> str:
@@ -274,7 +297,7 @@ def gap_unjudged(ctx: Ctx) -> None:
 
 
 # The court-records helper (a sub-agent run by court_research).
-HELPER_TOOLS = ["court_search", "court_filings", "court_file", "ask_pdf", "court_verdict"]
+HELPER_TOOLS = ["court_search", "court_filings", "court_file", "ask_pdf", "court_verdict", "pay_for_document"]
 HELPER_CALLS = 80  # model calls per court_research; the report after it is one more
 FOCUS_MAX = 500
 CONTEXT_MAX = 3_000
@@ -306,7 +329,8 @@ profession) is ruled out at once with court_verdict; download nothing for it.
 declarations, depositions, and motions or orders to exclude, limit or strike an expert are the best
 clues. Download a matched filing with court_file when it is available; when none is, list the case's
 public filings (court_filings) and pick the court's ruling on the expert or the expert's own filing.
-With ask_pdf read only the pages court_file says name the expert (name_on_pages), with one page
+A key filing that is not available (the expert's report or deposition, or a ruling on their
+testimony): ask for it with pay_for_document and say why; it may be refused, then move on. With ask_pdf read only the pages court_file says name the expert (name_on_pages), with one page
 before and after, never the whole file, and give the expert's details as context. Find out: is it
 the expert, their role, which side hired them, what they gave (report, declaration, deposition,
 trial testimony), fees, and how the court ruled on their testimony.
